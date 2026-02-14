@@ -15,7 +15,7 @@ from db import (
     get_queue_today, insert_queue_entry, update_queue_entry,
     get_bqms_state, update_bqms_state, get_users, authenticate,
     update_password, update_category_cap,
-    slot_counts, next_slot_num, is_duplicate, gen_id, today_mmdd, today_iso,
+    slot_counts, next_slot_num, is_duplicate, is_bqms_taken, gen_id, today_mmdd, today_iso,
     OSTATUS, STATUS_LABELS
 )
 
@@ -328,11 +328,16 @@ elif tab == "queue":
                         st.markdown("<div style='margin-top:6px;'></div>", unsafe_allow_html=True)
                         if st.button("🎫 Assign", key=f"ba_{r['id']}", type="primary", use_container_width=True):
                             if bv.strip():
-                                update_queue_entry(r["id"],
-                                    bqms_number=bv.strip().upper(),
-                                    status="ARRIVED",
-                                    arrived_at=now.isoformat())
-                                st.rerun()
+                                bv_clean = bv.strip().upper()
+                                fresh_q = get_queue_today()
+                                if is_bqms_taken(fresh_q, bv_clean):
+                                    st.error(f"❌ BQMS **{bv_clean}** is already assigned! Use a different number.")
+                                else:
+                                    update_queue_entry(r["id"],
+                                        bqms_number=bv_clean,
+                                        status="ARRIVED",
+                                        arrived_at=now.isoformat())
+                                    st.rerun()
                             else:
                                 st.warning("Enter BQMS# first.")
                     if st.button("❌ No-Show", key=f"ns_{r['id']}", use_container_width=True):

@@ -122,6 +122,47 @@ def slot_counts(cats, queue_list):
 def next_slot_num(queue_list):
     return len(queue_list) + 1
 
+def is_bqms_taken(queue_list, bqms_number):
+    """Check if a BQMS number is already assigned to an active entry today."""
+    if not bqms_number:
+        return False
+    bn = bqms_number.strip().upper()
+    for r in queue_list:
+        if r.get("status") in ("NO_SHOW", "COMPLETED"):
+            continue
+        if (r.get("bqms_number") or "").strip().upper() == bn:
+            return True
+    return False
+
+def count_ahead(queue_list, entry):
+    """Count active entries in same category with BQMS# ahead of this entry."""
+    my_bqms = entry.get("bqms_number", "")
+    my_cat = entry.get("category_id", "")
+    if not my_bqms:
+        return 0
+    try:
+        my_num = int("".join(filter(str.isdigit, str(my_bqms))))
+    except:
+        return 0
+    count = 0
+    for r in queue_list:
+        if r.get("id") == entry.get("id"):
+            continue
+        if r.get("category_id") != my_cat:
+            continue
+        if r.get("status") in ("NO_SHOW", "COMPLETED", "SERVING"):
+            continue
+        rb = r.get("bqms_number", "")
+        if not rb:
+            continue
+        try:
+            rn = int("".join(filter(str.isdigit, str(rb))))
+            if rn < my_num:
+                count += 1
+        except:
+            continue
+    return count
+
 def is_duplicate(queue_list, last, first, mobile):
     nk = f"{last}|{first}"
     for r in queue_list:

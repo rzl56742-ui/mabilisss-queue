@@ -12,7 +12,7 @@ from datetime import datetime, date
 from db import (
     VER, get_branch, get_categories_with_services, get_queue_today,
     insert_queue_entry, get_bqms_state, slot_counts, next_slot_num,
-    is_duplicate, gen_id, today_mmdd, today_iso, OSTATUS, STATUS_LABELS
+    is_duplicate, count_ahead, gen_id, today_mmdd, today_iso, OSTATUS, STATUS_LABELS
 )
 
 # ── Page Config ──
@@ -344,19 +344,32 @@ elif screen == "tracker":
                 cat_obj = next((c for c in cats if c["id"] == t.get("category_id")), None)
                 ns_val = fbq.get(t.get("category_id",""), "")
                 avg = cat_obj["avg_time"] if cat_obj else 10
-                ahead = 0
-                try:
-                    ns_num = int("".join(filter(str.isdigit, str(ns_val))))
-                    my_num = int("".join(filter(str.isdigit, str(t["bqms_number"]))))
-                    ahead = max(0, my_num - ns_num)
-                except: pass
+                ahead = count_ahead(fresh, t)
                 est = ahead * avg
-                m1,m2,m3 = st.columns(3)
-                with m1: st.markdown(f'<div class="sss-metric"><div class="val" style="color:#22B8CF;">{ns_val or "—"}</div><div class="lbl">Now Serving</div></div>', unsafe_allow_html=True)
-                with m2: st.markdown(f'<div class="sss-metric"><div class="val">{t["bqms_number"]}</div><div class="lbl">Your #</div></div>', unsafe_allow_html=True)
+
+                m1, m2 = st.columns(2)
+                with m1:
+                    ns_display = ns_val if ns_val else "—"
+                    st.markdown(f'<div class="sss-metric"><div class="val" style="color:#22B8CF;">{ns_display}</div><div class="lbl">Now Serving</div></div>', unsafe_allow_html=True)
+                with m2:
+                    st.markdown(f'<div class="sss-metric"><div class="val">{t["bqms_number"]}</div><div class="lbl">Your Number</div></div>', unsafe_allow_html=True)
+
+                m3, m4 = st.columns(2)
                 with m3:
-                    wt = "Next!" if est == 0 else f"~{est}m"
+                    ahead_display = "You're Next!" if ahead == 0 else str(ahead)
+                    ahead_color = "#22c55e" if ahead == 0 else "#f59e0b"
+                    st.markdown(f'<div class="sss-metric"><div class="val" style="color:{ahead_color};">{ahead_display}</div><div class="lbl">Queue Ahead</div></div>', unsafe_allow_html=True)
+                with m4:
+                    if ahead == 0:
+                        wt = "Any moment!"
+                    elif est < 60:
+                        wt = f"~{est} min"
+                    else:
+                        wt = f"~{est//60}h {est%60}m"
                     st.markdown(f'<div class="sss-metric"><div class="val">{wt}</div><div class="lbl">Est. Wait</div></div>', unsafe_allow_html=True)
+
+                if not ns_val:
+                    st.caption("💡 'Now Serving' updates when staff sets it. Queue Ahead is based on assigned BQMS numbers.")
         else:
             if not is_done and not is_ns:
                 st.markdown(f'<div class="sss-card" style="text-align:center;"><div style="font-size:11px;opacity:.5;">RESERVATION NUMBER</div><div class="sss-resnum">{t["res_num"]}</div></div>', unsafe_allow_html=True)
