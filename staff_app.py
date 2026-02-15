@@ -1,28 +1,29 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Staff Console (Protected)
- Kiosk registration, BQMS assignment, queue management.
- Run: streamlit run staff_app.py --server.port 8502
+ MabiliSSS Queue — Staff Console V2.1.0 (Protected)
  © RPT / SSS Gingoog Branch 2026
 ═══════════════════════════════════════════════════════════
 """
 
 import streamlit as st
 import time, csv, io
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from db import (
-    VER, get_branch, update_branch, get_categories_with_services,
-    get_queue_today, insert_queue_entry, update_queue_entry,
+    VER, SSS_LOGO, get_branch, update_branch, get_categories_with_services,
+    get_categories, get_services,
+    get_queue_today, get_queue_by_date, get_queue_date_range, get_available_dates,
+    insert_queue_entry, update_queue_entry,
     get_bqms_state, update_bqms_state, get_users, authenticate,
     update_password, update_category_cap,
-    slot_counts, next_slot_num, is_duplicate, is_bqms_taken, gen_id, today_mmdd, today_iso,
+    add_category, update_category, delete_category,
+    add_service, update_service, delete_service,
+    slot_counts, next_slot_num, is_duplicate, is_bqms_taken,
+    gen_id, today_mmdd, today_iso,
     OSTATUS, STATUS_LABELS
 )
 
-# ── Page Config ──
 st.set_page_config(page_title="MabiliSSS Staff", page_icon="🔐", layout="centered")
 
-# ── CSS ──
 st.markdown("""<style>
 .sss-header{background:linear-gradient(135deg,#002E52,#0066A1);color:#fff!important;padding:18px 22px;border-radius:12px;margin-bottom:16px}
 .sss-header h2{margin:0;font-size:22px;color:#fff!important}
@@ -38,7 +39,6 @@ st.markdown("""<style>
 .stButton>button{border-radius:8px;font-weight:700}
 </style>""", unsafe_allow_html=True)
 
-# ── Auto-refresh ──
 _ar_ok = False
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -47,7 +47,6 @@ try:
 except ImportError:
     pass
 
-# ── Session defaults ──
 for k, v in {"auth_user":None,"fail_count":0,"lock_until":0,
              "staff_tab":"queue","last_activity":time.time()}.items():
     if k not in st.session_state:
@@ -58,16 +57,21 @@ ROLE_ICONS  = {"kiosk":"🏢","staff":"🛡️","th":"👔","bh":"🏛️","dh":
 ROLE_LABELS = {"kiosk":"Kiosk","staff":"Staff","th":"Team Head","bh":"Branch Head","dh":"Division Head"}
 
 # ═══════════════════════════════════════════════════
-#  LOGIN
+#  LOGIN — NO DEFAULT PASSWORD HINT
 # ═══════════════════════════════════════════════════
 if not st.session_state.auth_user:
-    st.markdown('<div class="sss-header" style="text-align:center;"><span style="font-size:36px;">🔐</span><h2>Staff Portal</h2><p>MabiliSSS Queue · Authorized Personnel Only</p></div>', unsafe_allow_html=True)
+    st.markdown(f"""<div class="sss-header" style="text-align:center;">
+        <img src="{SSS_LOGO}" width="48" style="border-radius:8px;background:#fff;padding:3px;margin-bottom:8px;"/>
+        <h2>Staff Portal</h2>
+        <p>MabiliSSS Queue · Authorized Personnel Only</p>
+    </div>""", unsafe_allow_html=True)
+
     locked = time.time() < st.session_state.lock_until
     if locked:
         st.error(f"🔒 Locked. Wait {int(st.session_state.lock_until - time.time())}s.")
 
     with st.form("login"):
-        username = st.text_input("Username", placeholder="staff1, kiosk, th, bh")
+        username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         if st.form_submit_button("Login", type="primary", use_container_width=True, disabled=locked):
             u = authenticate(username, password)
@@ -85,7 +89,6 @@ if not st.session_state.auth_user:
                     st.error("❌ Locked for 5 minutes.")
                 else:
                     st.error(f"❌ Invalid credentials. {left} attempts left.")
-    st.caption("Default password: **mnd2026**")
     st.stop()
 
 # ═══════════════════════════════════════════════════
@@ -101,7 +104,6 @@ user = st.session_state.auth_user
 role = user["role"]
 is_ro = role in ("bh","dh")
 
-# ── Load data ──
 branch = get_branch()
 cats   = get_categories_with_services()
 queue  = get_queue_today()
@@ -114,17 +116,19 @@ sc     = slot_counts(cats, queue)
 # ═══════════════════════════════════════════════════
 st.markdown(f"""<div class="sss-header">
     <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div><h2>{ROLE_ICONS.get(role,'')} Staff Console</h2>
-            <p>{user['display_name']} · {ROLE_LABELS.get(role,role)}</p></div>
+        <div style="display:flex;align-items:center;gap:12px;">
+            <img src="{SSS_LOGO}" width="38" style="border-radius:8px;background:#fff;padding:2px;"/>
+            <div><h2>Staff Console</h2>
+                <p>{user['display_name']} · {ROLE_LABELS.get(role,role)}</p></div>
+        </div>
         <div style="text-align:right;font-size:12px;opacity:.8;">{now.strftime('%I:%M %p')}<br/>{date.today().isoformat()}</div>
     </div></div>""", unsafe_allow_html=True)
 
-st.caption(f"🔄 {'Auto-refresh 15s' if _ar_ok else 'Manual refresh'} · {len(queue)} entries · oStat: {o_stat} · {now.strftime('%I:%M:%S %p')}")
+st.caption(f"🔄 {'Auto-refresh 15s' if _ar_ok else 'Manual refresh'} · {len(queue)} entries · oStat: {o_stat}")
 
-# Nav
 nav = [("📋 Queue","queue")]
-if role == "th": nav.append(("👔 Admin","admin"))
-if role in ("th","bh","dh"): nav.append(("📊 Dashboard","dash"))
+if role in ("th","staff"): nav.append(("👔 Admin","admin"))
+if role in ("th","staff","bh","dh"): nav.append(("📊 Dashboard","dash"))
 nav += [("🔑 Password","pw"),("🚪 Logout","logout")]
 cols = st.columns(len(nav))
 for i,(lbl,key) in enumerate(nav):
@@ -162,7 +166,6 @@ elif tab == "queue":
     unassigned = [r for r in queue if not r.get("bqms_number") and r.get("status") not in ("NO_SHOW","COMPLETED")]
 
     if not is_ro:
-        # ── STATUS TOGGLE ──
         st.markdown("**System Status**")
         _sopts = ["🟢 Online","🟡 Intermittent","🔴 Offline"]
         _smap  = {"🟢 Online":"online","🟡 Intermittent":"intermittent","🔴 Offline":"offline"}
@@ -173,7 +176,6 @@ elif tab == "queue":
             update_branch(o_stat=_smap[new_s])
             st.rerun()
 
-        # ── ANNOUNCEMENT ──
         if role != "kiosk":
             with st.expander(f"📢 Announcement {'(ACTIVE)' if branch.get('announcement','').strip() else '(none)'}"):
                 with st.form("ann_form"):
@@ -188,11 +190,9 @@ elif tab == "queue":
                             update_branch(announcement="")
                             st.success("✅ Cleared!"); st.rerun()
 
-        # ── UNASSIGNED ALERT ──
         if unassigned:
             st.markdown(f'<div class="sss-alert sss-alert-red" style="font-size:16px;">🔴 <strong>{len(unassigned)} NEED BQMS#</strong></div>', unsafe_allow_html=True)
 
-        # ── BQMS NOW SERVING ──
         with st.expander("🔄 BQMS — Now Serving"):
             with st.form("bqms_form"):
                 new_bqms = {}
@@ -212,7 +212,6 @@ elif tab == "queue":
                             update_bqms_state(cid, ns)
                     st.success("✅ Updated!"); st.rerun()
 
-        # ── WALK-IN REGISTRATION ──
         with st.expander("➕ Add Walk-in"):
             with st.form("walkin"):
                 cat_labels = ["-- Select --"] + [f"{c['icon']} {c['label']} ({sc.get(c['id'],{}).get('remaining',0)} left)" for c in cats]
@@ -246,14 +245,16 @@ elif tab == "queue":
                     else:
                         fresh_q = get_queue_today()
                         fsc = slot_counts(cats, fresh_q)
+                        bv_check = wbqms.strip().upper() if wbqms else ""
                         if is_duplicate(fresh_q, wlu, wfu, wmu):
                             st.error("Duplicate entry.")
                         elif fsc.get(w_cat["id"],{}).get("remaining",0) <= 0:
-                            st.error("Category cap reached.")
+                            st.error(f"Daily cap reached for {w_cat['label']}.")
+                        elif bv_check and is_bqms_taken(fresh_q, bv_check):
+                            st.error(f"❌ BQMS **{bv_check}** already assigned!")
                         else:
                             slot = next_slot_num(fresh_q)
                             rn = f"K-{today_mmdd()}-{slot:03d}"
-                            bv = wbqms.strip().upper() if wbqms else ""
                             svc_lbl = w_svc["label"] if w_svc else "Walk-in"
                             svc_id  = w_svc["id"] if w_svc else "walkin"
                             entry = {
@@ -265,13 +266,13 @@ elif tab == "queue":
                                 "category": w_cat["label"], "category_id": w_cat["id"],
                                 "cat_icon": w_cat["icon"],
                                 "priority": "priority" if "Priority" in wpri else "regular",
-                                "status": "ARRIVED" if bv else "RESERVED",
-                                "bqms_number": bv or None, "source": "KIOSK",
+                                "status": "ARRIVED" if bv_check else "RESERVED",
+                                "bqms_number": bv_check or None, "source": "KIOSK",
                                 "issued_at": now.isoformat(),
-                                "arrived_at": now.isoformat() if bv else None,
+                                "arrived_at": now.isoformat() if bv_check else None,
                             }
                             insert_queue_entry(entry)
-                            st.success(f"✅ **{rn}** — Share this number with the member for tracking!")
+                            st.success(f"✅ **{rn}** — Share this with the member!")
                             st.rerun()
 
     # ── QUEUE LIST ──
@@ -369,37 +370,151 @@ elif tab == "queue":
     if st.button("🔄 Refresh Queue", use_container_width=True): st.rerun()
 
 # ═══════════════════════════════════════════════════
-#  ADMIN TAB (TH only)
+#  ADMIN TAB (TH/Staff)
 # ═══════════════════════════════════════════════════
-elif tab == "admin" and role == "th":
+elif tab == "admin" and role in ("th","staff"):
     st.subheader("👔 Admin Panel")
-    atabs = st.tabs(["👥 Users","📋 Categories","📊 Caps","🏢 Branch"])
+    atabs = st.tabs(["📋 Categories","🔧 Sub-Categories","📊 Daily Caps","👥 Users","🏢 Branch"])
 
+    # ── CATEGORIES (Full CRUD) ──
     with atabs[0]:
+        st.markdown("**Manage BQMS Categories**")
+        st.caption("These are the main transaction categories shown to members. Customize them to match your branch BQMS.")
+
+        for cat in cats:
+            with st.expander(f"{cat['icon']} {cat['label']} — `{cat['id']}` · Cap: {cat['cap']} · Avg: {cat['avg_time']}m"):
+                with st.form(f"edit_cat_{cat['id']}"):
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        new_label = st.text_input("Label", value=cat["label"], key=f"cl_{cat['id']}")
+                        new_icon = st.text_input("Icon (emoji)", value=cat["icon"], key=f"ci_{cat['id']}")
+                    with ec2:
+                        new_short = st.text_input("Short Label", value=cat.get("short_label",""), key=f"cs_{cat['id']}")
+                        new_avg = st.number_input("Avg Time (min)", value=cat["avg_time"], min_value=1, key=f"ca_{cat['id']}")
+                    new_order = st.number_input("Sort Order", value=cat.get("sort_order",0), min_value=0, key=f"co_{cat['id']}")
+
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        if st.form_submit_button("💾 Save", type="primary"):
+                            update_category(cat["id"],
+                                label=new_label.strip(), icon=new_icon.strip(),
+                                short_label=new_short.strip(), avg_time=new_avg,
+                                sort_order=new_order)
+                            st.success("✅ Updated!"); st.rerun()
+                    with ec2:
+                        if st.form_submit_button("🗑️ Delete Category"):
+                            delete_category(cat["id"])
+                            st.success(f"✅ Deleted {cat['label']}"); st.rerun()
+
+        st.markdown("---")
+        st.markdown("**➕ Add New Category**")
+        with st.form("add_cat"):
+            ac1, ac2 = st.columns(2)
+            with ac1:
+                nc_id = st.text_input("Category ID (unique, lowercase)", placeholder="e.g., loans_new")
+                nc_label = st.text_input("Full Label", placeholder="e.g., Salary Loans")
+                nc_icon = st.text_input("Icon (emoji)", value="📋")
+            with ac2:
+                nc_short = st.text_input("Short Label", placeholder="e.g., SalLoans")
+                nc_avg = st.number_input("Avg Service Time (min)", value=10, min_value=1)
+                nc_cap = st.number_input("Daily Cap", value=50, min_value=1)
+            nc_order = st.number_input("Sort Order", value=len(cats)+1, min_value=0)
+
+            if st.form_submit_button("➕ Add Category", type="primary"):
+                nid = nc_id.strip().lower().replace(" ","_")
+                if not nid or not nc_label.strip():
+                    st.error("ID and Label required.")
+                elif any(c["id"] == nid for c in cats):
+                    st.error(f"ID '{nid}' already exists.")
+                else:
+                    add_category(nid, nc_label.strip(), nc_icon.strip(),
+                                 nc_short.strip(), nc_avg, nc_cap, nc_order)
+                    st.success(f"✅ Added {nc_label.strip()}!"); st.rerun()
+
+    # ── SUB-CATEGORIES / SERVICES (Full CRUD) ──
+    with atabs[1]:
+        st.markdown("**Manage Sub-Categories / Services**")
+        st.caption("These are the specific services under each category. Customize to match your branch BQMS sub-categories.")
+
+        for cat in cats:
+            st.markdown(f"### {cat['icon']} {cat['label']}")
+            svcs = cat.get("services", [])
+            if not svcs:
+                st.caption("No sub-categories yet.")
+            for svc in svcs:
+                sc1, sc2, sc3 = st.columns([4,1,1])
+                with sc1:
+                    new_slabel = st.text_input("Label", value=svc["label"], key=f"sl_{svc['id']}", label_visibility="collapsed")
+                with sc2:
+                    if st.button("💾", key=f"ss_{svc['id']}"):
+                        update_service(svc["id"], label=new_slabel.strip())
+                        st.rerun()
+                with sc3:
+                    if st.button("🗑️", key=f"sd_{svc['id']}"):
+                        delete_service(svc["id"])
+                        st.rerun()
+
+            with st.form(f"add_svc_{cat['id']}"):
+                ns1, ns2 = st.columns([3,1])
+                with ns1:
+                    new_svc_label = st.text_input("New sub-category", placeholder="e.g., Calamity Loan", key=f"nsv_{cat['id']}")
+                with ns2:
+                    if st.form_submit_button("➕ Add"):
+                        if new_svc_label.strip():
+                            sid = f"{cat['id']}_{new_svc_label.strip().lower().replace(' ','_')[:20]}"
+                            add_service(sid, cat["id"], new_svc_label.strip(), len(svcs)+1)
+                            st.success(f"✅ Added!"); st.rerun()
+            st.markdown("---")
+
+    # ── DAILY CAPS ──
+    with atabs[2]:
+        st.markdown("**📊 Daily Caps — Slots per Category**")
+        st.caption("Set the maximum number of members accommodated per category for the WHOLE DAY (8AM-5PM). Served entries count toward the cap — only No-Show frees a slot.")
+
+        with st.form("caps"):
+            for cat in cats:
+                s = sc.get(cat["id"], {"used":0,"cap":50,"remaining":50})
+                st.markdown(f"**{cat['icon']} {cat['label']}** — Used: {s['used']} / Cap: {s['cap']} · Remaining: **{s['remaining']}**")
+                new_cap = st.number_input(
+                    f"Daily cap for {cat.get('short_label',cat['label'])}",
+                    value=s["cap"], min_value=1, max_value=999,
+                    key=f"cap_{cat['id']}",
+                    help=f"Currently {s['used']} used, {s['remaining']} remaining"
+                )
+                st.session_state[f"_ncap_{cat['id']}"] = new_cap
+
+            if st.form_submit_button("💾 Save All Caps", type="primary", use_container_width=True):
+                for cat in cats:
+                    nc = st.session_state.get(f"_ncap_{cat['id']}", cat["cap"])
+                    if nc != cat["cap"]:
+                        update_category_cap(cat["id"], nc)
+                st.success("✅ Caps saved!"); st.rerun()
+
+        st.markdown("---")
+        st.markdown("**📋 Today's Cap Status**")
+        for cat in cats:
+            s = sc.get(cat["id"], {"used":0,"cap":50,"remaining":50})
+            pct = (s["used"] / s["cap"] * 100) if s["cap"] > 0 else 0
+            bar_color = "#22c55e" if pct < 70 else "#f59e0b" if pct < 90 else "#ef4444"
+            st.markdown(f"""<div style="margin-bottom:8px;">
+                <div style="display:flex;justify-content:space-between;font-size:13px;">
+                    <span>{cat['icon']} {cat.get('short_label','')}</span>
+                    <span><b>{s['used']}</b> / {s['cap']} ({pct:.0f}%)</span>
+                </div>
+                <div style="background:rgba(128,128,128,.1);border-radius:4px;height:8px;overflow:hidden;">
+                    <div style="background:{bar_color};width:{min(pct,100):.0f}%;height:100%;border-radius:4px;"></div>
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+    # ── USERS ──
+    with atabs[3]:
         users = get_users()
         for u in users:
             rl = ROLE_LABELS.get(u["role"], u["role"])
             st.markdown(f"**{u['display_name']}** — {rl} · `{u['username']}` · {'🟢' if u.get('active',True) else '🔴'}")
 
-    with atabs[1]:
-        for cat in cats:
-            svcs = ", ".join(s["label"] for s in cat.get("services",[]))
-            st.markdown(f"**{cat['icon']} {cat['label']}** — Cap: {cat['cap']} · Avg: {cat['avg_time']}m")
-            st.caption(f"  Services: {svcs}")
-
-    with atabs[2]:
-        with st.form("caps"):
-            new_caps = {}
-            for cat in cats:
-                s = sc.get(cat["id"],{"used":0})
-                new_caps[cat["id"]] = st.number_input(f"{cat['icon']} {cat.get('short_label','')} (used: {s['used']})", value=cat["cap"], min_value=1, key=f"cap_{cat['id']}")
-            if st.form_submit_button("Save Caps", type="primary"):
-                for cid, cap in new_caps.items():
-                    if cap != next((c["cap"] for c in cats if c["id"]==cid), 0):
-                        update_category_cap(cid, cap)
-                st.success("✅ Saved!"); st.rerun()
-
-    with atabs[3]:
+    # ── BRANCH ──
+    with atabs[4]:
         with st.form("branch"):
             bn = st.text_input("Name", value=branch.get("name",""))
             ba = st.text_input("Address", value=branch.get("address",""))
@@ -409,15 +524,42 @@ elif tab == "admin" and role == "th":
                 st.success("✅ Saved!"); st.rerun()
 
 # ═══════════════════════════════════════════════════
-#  DASHBOARD TAB (TH, BH, DH)
+#  DASHBOARD TAB (TH, Staff, BH, DH)
 # ═══════════════════════════════════════════════════
-elif tab == "dash" and role in ("th","bh","dh"):
+elif tab == "dash" and role in ("th","staff","bh","dh"):
     st.subheader("📊 Dashboard")
-    tot  = len(queue)
-    done = len([r for r in queue if r.get("status") == "COMPLETED"])
-    ns   = len([r for r in queue if r.get("status") == "NO_SHOW"])
-    onl  = len([r for r in queue if r.get("source") == "ONLINE"])
-    ksk  = len([r for r in queue if r.get("source") == "KIOSK"])
+
+    # ── Date Slicer ──
+    st.markdown("**📅 Select Date Range**")
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        d_start = st.date_input("From", value=date.today(), key="dash_start")
+    with dc2:
+        d_end = st.date_input("To", value=date.today(), key="dash_end")
+
+    if d_start > d_end:
+        st.error("Start date must be before end date.")
+        st.stop()
+
+    is_today = (d_start == date.today() and d_end == date.today())
+
+    if is_today:
+        dash_q = queue
+        date_label = "Today"
+    elif d_start == d_end:
+        dash_q = get_queue_by_date(d_start.isoformat())
+        date_label = d_start.strftime("%b %d, %Y")
+    else:
+        dash_q = get_queue_date_range(d_start.isoformat(), d_end.isoformat())
+        date_label = f"{d_start.strftime('%b %d')} — {d_end.strftime('%b %d, %Y')}"
+
+    st.caption(f"📊 Showing data for: **{date_label}** · {len(dash_q)} entries")
+
+    tot  = len(dash_q)
+    done = len([r for r in dash_q if r.get("status") == "COMPLETED"])
+    ns   = len([r for r in dash_q if r.get("status") == "NO_SHOW"])
+    onl  = len([r for r in dash_q if r.get("source") == "ONLINE"])
+    ksk  = len([r for r in dash_q if r.get("source") == "KIOSK"])
 
     c1,c2,c3 = st.columns(3)
     with c1: st.metric("Total", tot)
@@ -427,22 +569,44 @@ elif tab == "dash" and role in ("th","bh","dh"):
     with c1: st.metric("📱 Online", onl)
     with c2: st.metric("🏢 Kiosk", ksk)
     if tot:
-        st.metric("📱 Online Adoption", f"{onl/tot*100:.0f}%")
-        st.metric("❌ No-Show Rate", f"{ns/tot*100:.1f}%")
+        c1,c2 = st.columns(2)
+        with c1: st.metric("📱 Online Adoption", f"{onl/tot*100:.0f}%")
+        with c2: st.metric("❌ No-Show Rate", f"{ns/tot*100:.1f}%")
 
-    # Per-category breakdown
-    st.markdown("**Per Category**")
-    for cat in cats:
-        s = sc.get(cat["id"], {"used":0,"cap":50,"remaining":50})
-        st.markdown(f"{cat['icon']} **{cat.get('short_label','')}** — {s['used']}/{s['cap']} · {s['remaining']} left")
+    if is_today:
+        st.markdown("**Per Category — Today's Cap**")
+        for cat in cats:
+            s = sc.get(cat["id"], {"used":0,"cap":50,"remaining":50})
+            st.markdown(f"{cat['icon']} **{cat.get('short_label','')}** — {s['used']}/{s['cap']} · {s['remaining']} remaining")
 
-    # CSV Export
+    # ── CSV Export with Date Slicer ──
+    st.markdown("---")
+    st.markdown(f"**📥 Export: {date_label}**")
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(["Res#","Source","Last","First","Category","Service","Status","BQMS#","Mobile","Priority"])
-    for r in queue:
-        w.writerow([r.get("res_num",""),r.get("source",""),r.get("last_name",""),r.get("first_name",""),r.get("category",""),r.get("service",""),r.get("status",""),r.get("bqms_number",""),r.get("mobile",""),r.get("priority","")])
-    st.download_button("📥 Export CSV", data=out.getvalue(), file_name=f"MabiliSSS_{date.today().isoformat()}.csv", mime="text/csv", use_container_width=True)
+    w.writerow(["Date","Res#","Source","Last","First","Category","Service","Status","BQMS#","Mobile","Priority","Issued","Arrived","Completed"])
+    for r in dash_q:
+        w.writerow([
+            r.get("queue_date",""), r.get("res_num",""), r.get("source",""),
+            r.get("last_name",""), r.get("first_name",""),
+            r.get("category",""), r.get("service",""),
+            r.get("status",""), r.get("bqms_number",""),
+            r.get("mobile",""), r.get("priority",""),
+            r.get("issued_at",""), r.get("arrived_at",""), r.get("completed_at","")
+        ])
+
+    fname = f"MabiliSSS_{d_start.isoformat()}"
+    if d_start != d_end:
+        fname += f"_to_{d_end.isoformat()}"
+    fname += ".csv"
+
+    st.download_button(
+        f"📥 Download CSV ({len(dash_q)} records)",
+        data=out.getvalue(),
+        file_name=fname,
+        mime="text/csv",
+        use_container_width=True
+    )
 
 # ═══════════════════════════════════════════════════
 #  FOOTER

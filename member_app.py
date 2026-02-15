@@ -1,8 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Member Portal (Public)
- Reserve slots online + track queue status in real-time.
- Run: streamlit run member_app.py --server.port 8501
+ MabiliSSS Queue — Member Portal V2.1.0 (Public)
  © RPT / SSS Gingoog Branch 2026
 ═══════════════════════════════════════════════════════════
 """
@@ -10,15 +8,13 @@
 import streamlit as st
 from datetime import datetime, date
 from db import (
-    VER, get_branch, get_categories_with_services, get_queue_today,
+    VER, SSS_LOGO, get_branch, get_categories_with_services, get_queue_today,
     insert_queue_entry, get_bqms_state, slot_counts, next_slot_num,
     is_duplicate, count_ahead, gen_id, today_mmdd, today_iso, OSTATUS, STATUS_LABELS
 )
 
-# ── Page Config ──
 st.set_page_config(page_title="MabiliSSS Queue", page_icon="🏛️", layout="centered")
 
-# ── CSS ──
 st.markdown("""<style>
 .sss-header{background:linear-gradient(135deg,#002E52,#0066A1);color:#fff!important;padding:18px 22px;border-radius:12px;margin-bottom:16px}
 .sss-header h2{margin:0;font-size:22px;color:#fff!important}
@@ -41,7 +37,6 @@ st.markdown("""<style>
 @keyframes sss-scroll{0%{transform:translateX(0%)}100%{transform:translateX(-33.33%)}}
 </style>""", unsafe_allow_html=True)
 
-# ── Auto-refresh ──
 _ar_ok = False
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -50,7 +45,6 @@ try:
 except ImportError:
     pass
 
-# ── Session defaults ──
 for k, v in {"screen":"home","sel_cat":None,"sel_svc":None,"ticket":None,"tracked_id":None}.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -60,8 +54,6 @@ def go(scr):
     st.rerun()
 
 now = datetime.now()
-
-# ── Load data (fresh every render = real-time sync) ──
 branch = get_branch()
 cats   = get_categories_with_services()
 queue  = get_queue_today()
@@ -71,21 +63,22 @@ is_open= o_stat != "offline"
 sc     = slot_counts(cats, queue)
 
 # ═══════════════════════════════════════════════════
-#  HEADER
+#  HEADER WITH SSS LOGO
 # ═══════════════════════════════════════════════════
 st.markdown(f"""<div class="sss-header">
     <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div><h2>🏛️ MabiliSSS Queue</h2><p>{branch.get('name','')} · {VER}</p></div>
+        <div style="display:flex;align-items:center;gap:12px;">
+            <img src="{SSS_LOGO}" width="44" height="44" style="border-radius:8px;background:#fff;padding:2px;"/>
+            <div><h2>MabiliSSS Queue</h2><p>{branch.get('name','')} · {VER}</p></div>
+        </div>
         <div style="text-align:right;font-size:13px;opacity:.8;">
             {now.strftime('%A, %b %d, %Y')}<br/>{now.strftime('%I:%M %p')}</div>
     </div></div>""", unsafe_allow_html=True)
 
-# Status bar
 sm = OSTATUS.get(o_stat, OSTATUS["online"])
 st.markdown(f"""<div class="sss-alert sss-alert-{sm['color']}" style="font-size:15px;">
     <strong>{sm['emoji']} {sm['label']}</strong></div>""", unsafe_allow_html=True)
 
-# Announcement
 _ann = branch.get("announcement", "").strip()
 if _ann:
     st.markdown(f"""<div style="position:sticky;top:0;z-index:999;
@@ -152,9 +145,18 @@ elif screen == "select_cat":
                 st.session_state.sel_cat = cat; go("select_svc")
         with c2:
             if full:
-                st.error("FULL")
+                st.markdown('<div style="text-align:center;"><span style="font-size:12px;font-weight:900;color:#ef4444;">FULL</span></div>', unsafe_allow_html=True)
             else:
                 st.markdown(f"<div style='text-align:center;'><span style='font-size:20px;font-weight:900;color:#3399CC;'>{s['remaining']}</span><br/><span style='font-size:10px;opacity:.5;'>left</span></div>", unsafe_allow_html=True)
+
+    # Check if ALL categories are full
+    all_full = all(sc.get(c["id"],{}).get("remaining",0) <= 0 for c in cats)
+    if all_full:
+        st.markdown("""<div class="sss-alert sss-alert-red" style="font-size:14px;">
+            <strong>⚠️ All slots for today are full.</strong><br/>
+            Please try again on the next working day (Mon-Fri, 8AM-5PM).
+            <br/><br/>Thank you for your patience!
+        </div>""", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════
 #  SELECT SERVICE
@@ -164,10 +166,24 @@ elif screen == "select_svc":
     if not cat: go("select_cat")
     else:
         if st.button("← Back"): go("select_cat")
-        st.subheader(f"Step 2: {cat['icon']} {cat.get('short_label','')}")
-        for svc in cat.get("services", []):
-            if st.button(f"● {svc['label']}", key=f"svc_{svc['id']}", use_container_width=True):
-                st.session_state.sel_svc = svc; go("member_form")
+
+        # Re-check cap with fresh data
+        fresh_q = get_queue_today()
+        fsc = slot_counts(cats, fresh_q)
+        s = fsc.get(cat["id"], {"remaining": 0})
+
+        if s["remaining"] <= 0:
+            st.markdown(f"""<div class="sss-alert sss-alert-red" style="font-size:14px;">
+                <strong>⚠️ No available slots for {cat['icon']} {cat['label']} today.</strong><br/>
+                Daily limit of <b>{s['cap']}</b> has been reached.<br/><br/>
+                Please try again on the <b>next working day</b> (Mon-Fri, 8AM-5PM).
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.subheader(f"Step 2: {cat['icon']} {cat.get('short_label','')}")
+            st.caption(f"Slots remaining: {s['remaining']} of {s['cap']}")
+            for svc in cat.get("services", []):
+                if st.button(f"● {svc['label']}", key=f"svc_{svc['id']}", use_container_width=True):
+                    st.session_state.sel_svc = svc; go("member_form")
 
 # ═══════════════════════════════════════════════════
 #  MEMBER FORM
@@ -194,7 +210,6 @@ elif screen == "member_form":
 
             if st.form_submit_button("📋 Reserve My Slot", type="primary", use_container_width=True):
                 lu = last_name.strip().upper(); fu = first_name.strip().upper(); mob = mobile.strip()
-                # Fresh read for validation
                 fresh_q = get_queue_today()
                 errors = []
                 if not lu: errors.append("Last Name required.")
@@ -202,7 +217,9 @@ elif screen == "member_form":
                 if not mob or len(mob) < 10: errors.append("Valid mobile required.")
                 if not consent: errors.append("Check privacy consent.")
                 fsc = slot_counts(cats, fresh_q)
-                if fsc.get(cat["id"],{}).get("remaining",0) <= 0: errors.append("Slots full.")
+                remaining = fsc.get(cat["id"],{}).get("remaining",0)
+                if remaining <= 0:
+                    errors.append(f"No available slots for {cat['label']} today. Daily cap of {fsc.get(cat['id'],{}).get('cap',0)} reached. Try next working day.")
                 if is_duplicate(fresh_q, lu, fu, mob): errors.append("Duplicate reservation.")
 
                 if errors:
@@ -234,6 +251,7 @@ elif screen == "ticket":
     else:
         st.markdown('<div style="text-align:center;"><span style="font-size:48px;">✅</span><h2 style="color:#22c55e;">Slot Reserved!</h2></div>', unsafe_allow_html=True)
         st.markdown(f"""<div class="sss-card" style="border-top:4px solid #3399CC;text-align:center;">
+            <img src="{SSS_LOGO}" width="32" style="border-radius:6px;background:#fff;padding:2px;margin-bottom:4px;"/>
             <div style="font-size:11px;opacity:.5;letter-spacing:2px;">MABILISSS QUEUE — {branch.get('name','').upper()}</div>
             <div style="font-weight:700;margin:4px 0;">{t['category']} — {t['service']}</div>
             <hr style="border:1px dashed rgba(128,128,128,.2);"/>
@@ -299,10 +317,6 @@ elif screen == "track_input":
 
                 if not found:
                     st.error(f"❌ Not found for '{v}'. Check input.")
-                    if fresh:
-                        st.caption(f"Queue has {len(fresh)} entries today.")
-                    else:
-                        st.caption("Queue is empty — no entries today.")
                 else:
                     st.session_state.tracked_id = found["id"]; go("tracker")
 
@@ -332,6 +346,7 @@ elif screen == "tracker":
             st.markdown('<div class="sss-alert sss-alert-red">❌ <strong>No-Show</strong></div>', unsafe_allow_html=True)
 
         st.markdown(f"""<div class="sss-card" style="border-top:4px solid {'#22B8CF' if has_bqms else '#3399CC'};text-align:center;">
+            <img src="{SSS_LOGO}" width="28" style="border-radius:6px;background:#fff;padding:2px;margin-bottom:4px;"/>
             <div style="font-size:11px;opacity:.5;">{branch.get('name','').upper()}</div>
             <div style="font-weight:700;margin:4px 0;">{t.get('category','')} — {t.get('service','')}</div>
             <span style="display:inline-block;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;background:rgba(51,153,204,.15);color:#3399CC;">

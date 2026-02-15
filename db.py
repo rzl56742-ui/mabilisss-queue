@@ -1,21 +1,22 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Database Layer (Supabase)
+ MabiliSSS Queue — Database Layer (Supabase) V2.1.0
  Shared by member_app.py and staff_app.py
 ═══════════════════════════════════════════════════════════
 """
 
 import streamlit as st
 from supabase import create_client
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import time, uuid, hashlib
 
-VER = "V2.0.0"
+VER = "V2.1.0"
+
+# SSS Official Logo
+SSS_LOGO = "https://upload.wikimedia.org/wikipedia/commons/thumb/9/90/Social_Security_System_%28Philippines%29_logo.svg/1200px-Social_Security_System_%28Philippines%29_logo.svg.png"
 
 # ── Supabase Connection ──
-# Reads from Streamlit secrets (deployed) or falls back to env vars
 def get_supabase():
-    """Get or create cached Supabase client."""
     if "sb_client" not in st.session_state:
         try:
             url = st.secrets["SUPABASE_URL"]
@@ -25,7 +26,7 @@ def get_supabase():
             url = os.environ.get("SUPABASE_URL", "")
             key = os.environ.get("SUPABASE_KEY", "")
         if not url or not key:
-            st.error("❌ Missing Supabase credentials. Check secrets or environment.")
+            st.error("❌ Missing Supabase credentials.")
             st.stop()
         st.session_state.sb_client = create_client(url, key)
     return st.session_state.sb_client
@@ -59,7 +60,7 @@ def update_branch(**kwargs):
     sb.table("branch_config").update(kwargs).eq("id", "main").execute()
 
 # ═══════════════════════════════════════════════════
-#  CATEGORIES & SERVICES
+#  CATEGORIES & SERVICES — FULL CRUD
 # ═══════════════════════════════════════════════════
 def get_categories():
     sb = get_supabase()
@@ -75,7 +76,6 @@ def get_services(category_id=None):
     return r.data or []
 
 def get_categories_with_services():
-    """Returns categories with nested services list — used by both portals."""
     cats = get_categories()
     svcs = get_services()
     svc_map = {}
@@ -87,6 +87,44 @@ def get_categories_with_services():
     for c in cats:
         c["services"] = svc_map.get(c["id"], [])
     return cats
+
+def add_category(cat_id, label, icon, short_label, avg_time, cap, sort_order):
+    sb = get_supabase()
+    sb.table("categories").insert({
+        "id": cat_id, "label": label, "icon": icon,
+        "short_label": short_label, "avg_time": avg_time,
+        "cap": cap, "sort_order": sort_order
+    }).execute()
+    try:
+        sb.table("bqms_state").insert({"category_id": cat_id}).execute()
+    except: pass
+
+def update_category(cat_id, **kwargs):
+    sb = get_supabase()
+    sb.table("categories").update(kwargs).eq("id", cat_id).execute()
+
+def delete_category(cat_id):
+    sb = get_supabase()
+    sb.table("services").delete().eq("category_id", cat_id).execute()
+    try:
+        sb.table("bqms_state").delete().eq("category_id", cat_id).execute()
+    except: pass
+    sb.table("categories").delete().eq("id", cat_id).execute()
+
+def add_service(svc_id, category_id, label, sort_order=0):
+    sb = get_supabase()
+    sb.table("services").insert({
+        "id": svc_id, "category_id": category_id,
+        "label": label, "sort_order": sort_order
+    }).execute()
+
+def update_service(svc_id, **kwargs):
+    sb = get_supabase()
+    sb.table("services").update(kwargs).eq("id", svc_id).execute()
+
+def delete_service(svc_id):
+    sb = get_supabase()
+    sb.table("services").delete().eq("id", svc_id).execute()
 
 def update_category_cap(cat_id, new_cap):
     sb = get_supabase()
@@ -100,6 +138,27 @@ def get_queue_today():
     r = sb.table("queue_entries").select("*").eq("queue_date", today_iso()).order("slot").execute()
     return r.data or []
 
+def get_queue_by_date(target_date):
+    sb = get_supabase()
+    r = sb.table("queue_entries").select("*").eq("queue_date", target_date).order("slot").execute()
+    return r.data or []
+
+def get_queue_date_range(start_date, end_date):
+    sb = get_supabase()
+    r = (sb.table("queue_entries").select("*")
+         .gte("queue_date", start_date)
+         .lte("queue_date", end_date)
+         .order("queue_date")
+         .order("slot")
+         .execute())
+    return r.data or []
+
+def get_available_dates():
+    sb = get_supabase()
+    r = sb.table("queue_entries").select("queue_date").execute()
+    dates = sorted(set(row["queue_date"] for row in (r.data or [])), reverse=True)
+    return dates
+
 def insert_queue_entry(entry):
     sb = get_supabase()
     sb.table("queue_entries").insert(entry).execute()
@@ -108,13 +167,17 @@ def update_queue_entry(entry_id, **kwargs):
     sb = get_supabase()
     sb.table("queue_entries").update(kwargs).eq("id", entry_id).execute()
 
-def count_active_by_category(queue_list, cat_id):
-    return len([r for r in queue_list if r.get("category_id") == cat_id and r.get("status") not in ("NO_SHOW","COMPLETED")])
+def count_daily_by_category(queue_list, cat_id):
+    """Count ALL entries for today EXCEPT NO_SHOW.
+    Served entries STILL count — cap is for the WHOLE DAY."""
+    return len([r for r in queue_list
+                if r.get("category_id") == cat_id
+                and r.get("status") != "NO_SHOW"])
 
 def slot_counts(cats, queue_list):
     m = {}
     for c in cats:
-        used = count_active_by_category(queue_list, c["id"])
+        used = count_daily_by_category(queue_list, c["id"])
         cap = c.get("cap", 50)
         m[c["id"]] = {"used": used, "cap": cap, "remaining": max(0, cap - used)}
     return m
@@ -123,7 +186,6 @@ def next_slot_num(queue_list):
     return len(queue_list) + 1
 
 def is_bqms_taken(queue_list, bqms_number):
-    """Check if a BQMS number is already assigned to an active entry today."""
     if not bqms_number:
         return False
     bn = bqms_number.strip().upper()
@@ -135,7 +197,6 @@ def is_bqms_taken(queue_list, bqms_number):
     return False
 
 def count_ahead(queue_list, entry):
-    """Count active entries in same category with BQMS# ahead of this entry."""
     my_bqms = entry.get("bqms_number", "")
     my_cat = entry.get("category_id", "")
     if not my_bqms:
@@ -201,12 +262,10 @@ def get_users():
     return r.data or []
 
 def authenticate(username, password):
-    """Returns user dict or None."""
     users = get_users()
     u = next((x for x in users if x["username"].lower() == username.strip().lower() and x.get("active", True)), None)
     if not u:
         return None
-    # Support both plain text (initial) and hashed passwords
     pw_hash = hash_pw(password)
     if u["password_hash"] == password or u["password_hash"] == pw_hash:
         return u
