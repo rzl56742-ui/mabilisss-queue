@@ -26,7 +26,7 @@ st.markdown("""<style>
 .sss-card strong,.sss-card b{color:var(--text-color,#1a1a2e)}
 .sss-metric{text-align:center;padding:14px 8px;border-radius:10px;background:var(--secondary-background-color,#f5f5f5);border:1px solid rgba(128,128,128,.1)}
 .sss-metric .val{font-size:30px;font-weight:900;line-height:1.2}
-.sss-metric .lbl{font-size:11px;opacity:.6;margin-top:2px}
+.sss-metric .lbl{font-size:12px;opacity:.8;margin-top:4px;font-weight:600}
 .sss-alert{border-radius:8px;padding:12px 16px;margin-bottom:12px;font-weight:600;text-align:center}
 .sss-alert-red{background:rgba(220,53,69,.15);color:#ef4444;border:1px solid rgba(220,53,69,.3)}
 .sss-alert-green{background:rgba(15,157,88,.12);color:#22c55e;border:1px solid rgba(15,157,88,.25)}
@@ -144,15 +144,24 @@ if not _ar_ok:
 if screen == "home":
     waiting_q = len([r for r in queue if r.get("status") in ("RESERVED", "ARRIVED")])
     serving_q = len([r for r in queue if r.get("status") == "SERVING"])
-    done_q = len([r for r in queue if r.get("status") == "COMPLETED"])
+    total_remaining = sum(sc.get(c["id"], {}).get("remaining", 0) for c in cats)
+
+    # ── Live Queue Snapshot — helps members decide if now is a good time ──
+    st.markdown(f"""<div class="sss-card" style="padding:10px 14px;">
+        <div style="font-size:11px;opacity:.5;text-align:center;margin-bottom:8px;letter-spacing:1px;">
+            📊 LIVE QUEUE STATUS — {branch.get('name','').upper()}</div></div>""", unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown(f'<div class="sss-metric"><div class="val" style="color:#f59e0b;">{waiting_q}</div><div class="lbl">Waiting</div></div>', unsafe_allow_html=True)
+        wc = "#f59e0b" if waiting_q > 0 else "#22c55e"
+        st.markdown(f'<div class="sss-metric"><div class="val" style="color:{wc};">📋 {waiting_q}</div><div class="lbl">In Queue</div></div>', unsafe_allow_html=True)
     with c2:
-        st.markdown(f'<div class="sss-metric"><div class="val" style="color:#3399CC;">{serving_q}</div><div class="lbl">Being Served</div></div>', unsafe_allow_html=True)
+        sc_color = "#3399CC" if serving_q > 0 else "rgba(128,128,128,.4)"
+        st.markdown(f'<div class="sss-metric"><div class="val" style="color:{sc_color};">🔵 {serving_q}</div><div class="lbl">Being Served</div></div>', unsafe_allow_html=True)
     with c3:
-        st.markdown(f'<div class="sss-metric"><div class="val" style="color:#22c55e;">{done_q}</div><div class="lbl">Completed</div></div>', unsafe_allow_html=True)
+        rc = "#22c55e" if total_remaining > 10 else "#f59e0b" if total_remaining > 0 else "#ef4444"
+        rl = "FULL" if total_remaining <= 0 else str(total_remaining)
+        st.markdown(f'<div class="sss-metric"><div class="val" style="color:{rc};">🎫 {rl}</div><div class="lbl">Slots Left Today</div></div>', unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -168,14 +177,14 @@ if screen == "home":
     if not is_open:
         st.warning("🔴 Reservation is currently closed.")
 
-    st.markdown(f"""<div class="sss-card" style="border-left:4px solid #f59e0b;">
-        <strong>📌 How It Works</strong><br/><br/>
-        1. Tap <b>"Reserve a Slot"</b> and fill in your details.<br/>
-        2. Go to {branch.get('name','')} during office hours.<br/>
-        3. Present your reservation to the guard.<br/>
-        4. Staff assigns your <b>official BQMS queue number</b>.<br/>
-        5. Tap <b>"Track My Queue"</b> to monitor live!<br/>
-        6. Need to cancel? Use <b>"Track My Queue"</b> and tap Cancel.
+    st.markdown(f"""<div class="sss-card" style="border-left:4px solid #0066A1;">
+        <strong>📌 Paano Gamitin / How It Works</strong><br/><br/>
+        <b>Step 1:</b> Tap <b>"Reserve a Slot"</b> → choose your transaction → fill in your name and mobile number.<br/><br/>
+        <b>Step 2:</b> Save your <b>Reservation Number</b> (ex: R-0215-001).<br/><br/>
+        <b>Step 3:</b> Go to <b>{branch.get('name','')}</b> during office hours. Show your reservation to the guard.<br/><br/>
+        <b>Step 4:</b> Staff will assign your official <b>BQMS queue number</b>.<br/><br/>
+        <b>Step 5:</b> Tap <b>"Track My Queue"</b> anytime to check your position and estimated wait time!<br/><br/>
+        <b>📱 Need to cancel?</b> Tap "Track My Queue" → find your entry → tap <b>Cancel</b>. Your slot will be released for other members.
     </div>""", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════
@@ -366,13 +375,13 @@ elif screen == "ticket":
             <div style="font-size:12px;">{t['last_name']}, {t['first_name']} {t.get('mi','')}<br/>📱 {t['mobile']}</div>
         </div>""", unsafe_allow_html=True)
 
-        st.markdown(f"""<div class="sss-card" style="border-left:4px solid #3399CC;">
-            <strong>📋 Next Steps:</strong><br/>
-            1. Save: <code style="font-size:16px;font-weight:900;">{t['res_num']}</code><br/>
-            2. Go to <strong>{branch.get('name','')}</strong><br/>
-            3. Present to guard → get <strong>BQMS number</strong><br/>
-            4. Tap <strong>"Track My Queue"</strong> anytime!<br/>
-            5. Need to cancel? Track your queue and tap <strong>Cancel</strong>.
+        st.markdown(f"""<div class="sss-card" style="border-left:4px solid #0066A1;">
+            <strong>📋 What to Do Next:</strong><br/><br/>
+            <b>1.</b> Save your Reservation Number: <code style="font-size:16px;font-weight:900;">{t['res_num']}</code><br/>
+            <b>2.</b> Go to <strong>{branch.get('name','')}</strong> during office hours (Mon-Fri, 8AM-5PM).<br/>
+            <b>3.</b> Show your reservation to the guard → you'll get your <strong>official BQMS queue number</strong>.<br/>
+            <b>4.</b> Tap <strong>"Track My Queue"</strong> anytime to check your position!<br/>
+            <b>5.</b> Need to cancel? Track your queue and tap <strong>Cancel</strong>.
         </div>""", unsafe_allow_html=True)
 
         c1, c2 = st.columns(2)
