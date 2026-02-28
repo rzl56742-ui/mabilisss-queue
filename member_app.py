@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Member Portal V2.2.0 (Public)
+ MabiliSSS Queue — Member Portal V2.3.0 (Public)
  © RPT / SSS Gingoog Branch 2026
 ═══════════════════════════════════════════════════════════
 """
@@ -13,6 +13,7 @@ from db import (
     insert_queue_entry, get_bqms_state, slot_counts, next_slot_num,
     is_duplicate, count_ahead, cancel_entry, expire_old_reserved,
     validate_mobile_ph, gen_id, extract_bqms_num,
+    count_arrived_in_category, count_reserved_position, calc_est_wait,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED
 )
 
@@ -288,6 +289,23 @@ elif screen == "member_form":
                 with fc2:
                     mobile = st.text_input("Mobile * (09XX XXX XXXX)", placeholder="09171234567")
                 pri = st.radio("Lane:", ["👤 Regular", "⭐ Priority (Senior/PWD/Pregnant)"], horizontal=True)
+
+                # V2.3.0: Priority Lane Verification Warning
+                pri_confirmed = True  # Default for Regular
+                if "Priority" in pri:
+                    st.markdown("""<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
+                        border-radius:8px;padding:10px 14px;margin:6px 0;font-size:12px;">
+                        ⚠️ <b>Priority Lane — Verification Required</b><br/><br/>
+                        Reserved for: 👴 <b>Senior Citizens</b> (60+) · ♿ <b>PWD</b> · 🤰 <b>Pregnant Women</b><br/><br/>
+                        📋 You will be asked to present <b>valid proof at the counter</b>:<br/>
+                        &nbsp;&nbsp;• Senior Citizen ID or gov't ID showing date of birth<br/>
+                        &nbsp;&nbsp;• PWD ID<br/>
+                        &nbsp;&nbsp;• Medical certificate or visible evidence of pregnancy<br/><br/>
+                        ❌ <b>If you cannot present valid proof, you will be moved to the Regular Lane</b>
+                        and your queue position will be adjusted.
+                    </div>""", unsafe_allow_html=True)
+                    pri_confirmed = st.checkbox("✅ I qualify and will present proof at the counter.", key="pri_confirm")
+
                 st.markdown("**🔒 Data Privacy (RA 10173)**")
                 consent = st.checkbox("I consent to data collection for today's queue.")
 
@@ -311,6 +329,10 @@ elif screen == "member_form":
 
                     if not consent:
                         errors.append("Check privacy consent.")
+
+                    # V2.3.0: Priority lane confirmation required
+                    if "Priority" in pri and not pri_confirmed:
+                        errors.append("Please confirm you qualify for the Priority Lane.")
 
                     # Fresh cap check at submission time
                     fresh_q = get_queue_today()
@@ -503,9 +525,7 @@ elif screen == "tracker":
             if not is_terminal:
                 cat_obj = next((c for c in cats if c["id"] == t.get("category_id")), None)
                 ns_val = fbq.get(t.get("category_id", ""), "")
-                avg = cat_obj["avg_time"] if cat_obj else 10
                 ahead = count_ahead(fresh, t)
-                est = ahead * avg
 
                 m1, m2 = st.columns(2)
                 with m1:
@@ -520,20 +540,69 @@ elif screen == "tracker":
                     ahead_color = "#22c55e" if ahead == 0 else "#f59e0b"
                     st.markdown(f'<div class="sss-metric"><div class="val" style="color:{ahead_color};">{ahead_display}</div><div class="lbl">Queue Ahead</div></div>', unsafe_allow_html=True)
                 with m4:
+                    # V2.3.0: Improved estimated wait (range, actual speed)
                     if ahead == 0:
                         wt = "Any moment!"
-                    elif est < 60:
-                        wt = f"~{est} min"
+                        wt_note = ""
                     else:
-                        wt = f"~{est // 60}h {est % 60}m"
+                        est_low, est_high, est_src = calc_est_wait(fresh, t, cats)
+                        if est_low is not None and est_high is not None:
+                            if est_high < 60:
+                                wt = f"~{est_low}–{est_high} min"
+                            else:
+                                wt = f"~{est_low // 60}h{est_low % 60}m–{est_high // 60}h{est_high % 60}m"
+                            wt_note = "today's speed" if est_src == "today" else "typical speed"
+                        else:
+                            avg = cat_obj["avg_time"] if cat_obj else 10
+                            est = ahead * avg
+                            wt = f"~{est} min" if est < 60 else f"~{est // 60}h {est % 60}m"
+                            wt_note = "estimate"
                     st.markdown(f'<div class="sss-metric"><div class="val">{wt}</div><div class="lbl">Est. Wait</div></div>', unsafe_allow_html=True)
+
+                # V2.3.0: Wait time disclaimer
+                if ahead > 0:
+                    st.caption("⏱ Estimate based on today's average service speed. Actual wait may vary.")
 
                 if not ns_val:
                     st.caption("💡 'Now Serving' updates automatically when staff processes entries.")
         else:
+            # ── V2.3.0: PRE-8AM TRACKER (no BQMS yet) ──
             if not is_terminal:
                 st.markdown(f'<div class="sss-card" style="text-align:center;"><div style="font-size:11px;opacity:.5;">RESERVATION NUMBER</div><div class="sss-resnum">{t["res_num"]}</div></div>', unsafe_allow_html=True)
-                st.markdown('<div class="sss-alert sss-alert-yellow">⏳ <strong>Waiting for BQMS Number</strong><br/>Staff will assign when you arrive at the branch. Auto-refreshes.</div>', unsafe_allow_html=True)
+
+                cat_id = t.get("category_id", "")
+                at_branch = count_arrived_in_category(fresh, cat_id)
+                my_pos = count_reserved_position(fresh, t)
+                is_arrived = t.get("status") == "ARRIVED"
+                batch_time = branch.get("batch_assign_time", "08:00")
+
+                if is_arrived:
+                    # Member is at the branch, checked in, waiting for batch assign
+                    st.markdown(f"""<div class="sss-alert sss-alert-green">
+                        ✅ <strong>You're checked in!</strong><br/>
+                        BQMS numbers will be assigned at <b>{batch_time} AM</b>.<br/>
+                        You are among <b>{at_branch} members</b> at the branch for this category.
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    # Member reserved online, not yet at branch
+                    m1, m2 = st.columns(2)
+                    with m1:
+                        at_color = "#f59e0b" if at_branch > 0 else "#22c55e"
+                        st.markdown(f'<div class="sss-metric"><div class="val" style="color:{at_color};">🏢 {at_branch}</div><div class="lbl">At Branch</div></div>', unsafe_allow_html=True)
+                    with m2:
+                        st.markdown(f'<div class="sss-metric"><div class="val" style="color:#3399CC;">📱 #{my_pos}</div><div class="lbl">Online Pos</div></div>', unsafe_allow_html=True)
+
+                    st.markdown(f"""<div class="sss-alert sss-alert-yellow">
+                        ⏳ <strong>Waiting for BQMS Number</strong><br/>
+                        BQMS numbers assigned at <b>{batch_time} AM</b>. Members at the branch are served first.<br/>
+                        <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos}</b> — {at_branch} member(s) already at the branch will be ahead of you.</span>
+                    </div>""", unsafe_allow_html=True)
+
+                    st.markdown(f"""<div class="sss-card" style="border-left:4px solid #22c55e;">
+                        💡 <strong>Early Bird Tip:</strong> Arrive before {batch_time} AM and check in with the guard to get
+                        <b>priority over online reservations</b>!<br/>
+                        <span style="font-size:11px;opacity:.6;">⚠️ Position may change as more members arrive.</span>
+                    </div>""", unsafe_allow_html=True)
 
         # ── Action buttons ──
         c1, c2 = st.columns(2)

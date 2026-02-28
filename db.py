@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Database Layer V2.2.0 (Supabase)
+ MabiliSSS Queue — Database Layer V2.3.0 (Supabase)
  Shared by member_app.py and staff_app.py
  All times in PHT (UTC+8)
 ═══════════════════════════════════════════════════════════
@@ -11,7 +11,7 @@ from supabase import create_client
 from datetime import date, datetime, timezone, timedelta
 import time, uuid, hashlib, re
 
-VER = "V2.2.0"
+VER = "V2.3.0"
 
 # ── Philippine Standard Time ──
 PHT = timezone(timedelta(hours=8))
@@ -241,13 +241,18 @@ def void_entry(entry_id, reason, voided_by):
 
 def expire_old_reserved():
     """Auto-expire: set all RESERVED entries from past dates to EXPIRED.
-    Called on app load. Handles entries from any previous day still in RESERVED."""
-    sb = get_supabase()
-    today = today_iso()
-    sb.table("queue_entries").update({
-        "status": "EXPIRED",
-        "expired_at": now_pht().isoformat()
-    }).eq("status", "RESERVED").lt("queue_date", today).execute()
+    Called on app load. Handles entries from any previous day still in RESERVED.
+    Wrapped in try/except — migration may not have run yet."""
+    try:
+        sb = get_supabase()
+        today = today_iso()
+        sb.table("queue_entries").update({
+            "status": "EXPIRED",
+            "expired_at": now_pht().isoformat()
+        }).eq("status", "RESERVED").lt("queue_date", today).execute()
+    except Exception:
+        # Migration not yet applied — silently skip, don't crash the app
+        pass
 
 # ═══════════════════════════════════════════════════
 #  SLOT / CAP LOGIC
@@ -402,6 +407,198 @@ def count_ahead(queue_list, entry):
         if rn is not None and rn < my_num:
             count += 1
     return count
+
+# ═══════════════════════════════════════════════════
+#  V2.3.0 — BATCH ASSIGN
+# ═══════════════════════════════════════════════════
+def batch_assign_category(queue_list, category, assigned_by):
+    """Batch-assign BQMS# to all unassigned entries in a category.
+    Sort order (4-tier):
+      1. ARRIVED + priority  → arrived_at ASC
+      2. ARRIVED + regular   → arrived_at ASC
+      3. RESERVED + priority → issued_at ASC
+      4. RESERVED + regular  → issued_at ASC
+    Returns (count_assigned, first_bqms, last_bqms) or (0, None, None)."""
+    cat_id = category["id"]
+    prefix = category.get("bqms_prefix", "") or ""
+
+    # Collect unassigned, non-terminal entries for this category
+    pool = [e for e in queue_list
+            if e.get("category_id") == cat_id
+            and not e.get("bqms_number")
+            and e.get("status") not in TERMINAL]
+    if not pool:
+        return 0, None, None
+
+    # Build 4 tiers
+    def sort_key_arrived(e):
+        return e.get("arrived_at") or "9999"
+    def sort_key_issued(e):
+        return e.get("issued_at") or "9999"
+
+    t1 = sorted([e for e in pool if e.get("status") == "ARRIVED" and e.get("priority") == "priority"], key=sort_key_arrived)
+    t2 = sorted([e for e in pool if e.get("status") == "ARRIVED" and e.get("priority") != "priority"], key=sort_key_arrived)
+    t3 = sorted([e for e in pool if e.get("status") != "ARRIVED" and e.get("priority") == "priority"], key=sort_key_issued)
+    t4 = sorted([e for e in pool if e.get("status") != "ARRIVED" and e.get("priority") != "priority"], key=sort_key_issued)
+
+    ordered = t1 + t2 + t3 + t4
+
+    # Get starting BQMS number
+    next_num_str = suggest_next_bqms(queue_list, category)
+    if not next_num_str:
+        rs = category.get("bqms_range_start")
+        next_num = rs if rs else 1
+    else:
+        next_num = extract_bqms_num(next_num_str)
+        if next_num is None:
+            next_num = category.get("bqms_range_start", 1)
+
+    ts = now_pht().isoformat()
+    first_bqms = None
+    last_bqms = None
+
+    for entry in ordered:
+        bqms_str = f"{prefix}{next_num}"
+        if first_bqms is None:
+            first_bqms = bqms_str
+        last_bqms = bqms_str
+
+        upd = {"bqms_number": bqms_str}
+        # Promote RESERVED → ARRIVED
+        if entry.get("status") == "RESERVED":
+            upd["status"] = "ARRIVED"
+            upd["arrived_at"] = ts
+        update_queue_entry(entry["id"], **upd)
+        next_num += 1
+
+    # Log the batch assign
+    insert_batch_log(cat_id, category.get("label", ""), len(ordered), assigned_by,
+                     f"BQMS {first_bqms}–{last_bqms}")
+    return len(ordered), first_bqms, last_bqms
+
+
+def batch_assign_all(queue_list, categories, assigned_by):
+    """Batch-assign all categories at once. Returns dict {cat_id: (count, first, last)}."""
+    results = {}
+    # Must re-read queue after each category to get correct next BQMS
+    for cat in categories:
+        fresh_q = get_queue_today()
+        cnt, first, last = batch_assign_category(fresh_q, cat, assigned_by)
+        if cnt > 0:
+            results[cat["id"]] = (cnt, first, last)
+    return results
+
+
+# ═══════════════════════════════════════════════════
+#  V2.3.0 — QUICK CHECK-IN (Guard confirms arrival)
+# ═══════════════════════════════════════════════════
+def quick_checkin(entry_id):
+    """Guard confirms member has arrived. Sets ARRIVED + timestamp."""
+    ts = now_pht().isoformat()
+    update_queue_entry(entry_id, status="ARRIVED", arrived_at=ts)
+
+
+# ═══════════════════════════════════════════════════
+#  V2.3.0 — PRE-8AM TRACKER HELPERS
+# ═══════════════════════════════════════════════════
+def count_arrived_in_category(queue_list, cat_id):
+    """Count members physically at the branch (ARRIVED status) in a category."""
+    return len([e for e in queue_list
+                if e.get("category_id") == cat_id
+                and e.get("status") == "ARRIVED"
+                and e.get("status") not in TERMINAL])
+
+
+def count_reserved_position(queue_list, entry):
+    """Get this entry's position among RESERVED entries in its category (by issued_at).
+    Returns 1-based position. E.g., position 3 = two reservations were made earlier."""
+    cat_id = entry.get("category_id", "")
+    my_issued = entry.get("issued_at", "9999")
+    my_id = entry.get("id", "")
+
+    reserved = [e for e in queue_list
+                if e.get("category_id") == cat_id
+                and e.get("status") == "RESERVED"
+                and not e.get("bqms_number")
+                and e.get("status") not in TERMINAL]
+    reserved.sort(key=lambda e: e.get("issued_at", "9999"))
+
+    for idx, e in enumerate(reserved):
+        if e.get("id") == my_id:
+            return idx + 1
+    return len(reserved) + 1
+
+
+# ═══════════════════════════════════════════════════
+#  V2.3.0 — ESTIMATED WAIT TIME (actual speed)
+# ═══════════════════════════════════════════════════
+def calc_est_wait(queue_list, entry, categories):
+    """Calculate estimated wait time based on today's actual service speed.
+    Returns (est_min_low, est_min_high, source_label) or (None, None, None)."""
+    cat_id = entry.get("category_id", "")
+    cat_obj = next((c for c in categories if c["id"] == cat_id), None)
+    if not cat_obj:
+        return None, None, None
+
+    ahead = count_ahead(queue_list, entry)
+    if ahead == 0:
+        return 0, 0, "next"
+
+    # Try actual speed from today's completed entries with serving_at
+    completed = [e for e in queue_list
+                 if e.get("category_id") == cat_id
+                 and e.get("status") == "COMPLETED"
+                 and e.get("serving_at") and e.get("completed_at")]
+
+    avg_minutes = None
+    if len(completed) >= 3:
+        durations = []
+        for e in completed:
+            try:
+                srv = datetime.fromisoformat(e["serving_at"])
+                cmp = datetime.fromisoformat(e["completed_at"])
+                dur = (cmp - srv).total_seconds() / 60.0
+                if 0.5 <= dur <= 120:  # sanity: 30s to 2h
+                    durations.append(dur)
+            except (ValueError, TypeError):
+                continue
+        if len(durations) >= 3:
+            avg_minutes = sum(durations) / len(durations)
+
+    if avg_minutes is not None:
+        est = ahead * avg_minutes
+        return round(est * 0.75), round(est * 1.35), "today"
+    else:
+        # Fall back to configured avg_time
+        avg = cat_obj.get("avg_time", 10)
+        est = ahead * avg
+        return round(est * 0.75), round(est * 1.35), "typical"
+
+
+# ═══════════════════════════════════════════════════
+#  V2.3.0 — BATCH ASSIGN LOG
+# ═══════════════════════════════════════════════════
+def get_batch_log_today():
+    """Get all batch assign log entries for today."""
+    sb = get_supabase()
+    r = sb.table("batch_assign_log").select("*").eq("queue_date", today_iso()).execute()
+    return r.data or []
+
+
+def insert_batch_log(cat_id, cat_label, count, assigned_by, detail=""):
+    """Insert a batch assign audit log entry."""
+    sb = get_supabase()
+    sb.table("batch_assign_log").insert({
+        "id": gen_id(),
+        "category_id": cat_id,
+        "category_label": cat_label,
+        "assigned_count": count,
+        "assigned_by": assigned_by,
+        "assigned_at": now_pht().isoformat(),
+        "queue_date": today_iso(),
+        "detail": detail,
+    }).execute()
+
 
 # ═══════════════════════════════════════════════════
 #  DUPLICATE DETECTION

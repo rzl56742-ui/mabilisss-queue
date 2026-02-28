@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Staff Console V2.2.0 (Protected)
+ MabiliSSS Queue — Staff Console V2.3.0 (Protected)
  © RPT / SSS Gingoog Branch 2026
 ═══════════════════════════════════════════════════════════
 """
@@ -25,6 +25,8 @@ from db import (
     validate_bqms_range, suggest_next_bqms, find_bqms_conflict_category,
     validate_mobile_ph, extract_bqms_num,
     gen_id, hash_pw,
+    batch_assign_category, batch_assign_all, quick_checkin,
+    get_batch_log_today,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED,
     ROLES, ROLE_LABELS, ROLE_ICONS
 )
@@ -269,6 +271,187 @@ elif tab == "queue":
                     update_bqms_state(override_c["id"], ns_new.strip().upper())
                     st.rerun()
 
+    # ═══════════════════════════════════════════════════
+    #  V2.3.0 — QUICK CHECK-IN (Guard + Staff)
+    # ═══════════════════════════════════════════════════
+    if can_edit_queue:
+        with st.expander("🔍 Quick Check-in (Online Reservations)"):
+            st.caption("Search by Reservation # or mobile → one-tap arrival confirmation.")
+            qc_val = st.text_input("Search Res# or Mobile", key="qc_search",
+                                   placeholder="R-0228-003 or 09171234567")
+            if qc_val.strip():
+                qc_v = qc_val.strip()
+                qc_results = []
+                for r in queue:
+                    if r.get("status") in TERMINAL:
+                        continue
+                    if r.get("source") != "ONLINE":
+                        continue
+                    rn = (r.get("res_num") or "").upper()
+                    mob = r.get("mobile") or ""
+                    mob_input = validate_mobile_ph(qc_v) or qc_v.upper()
+                    if qc_v.upper() in rn or mob_input == mob or qc_v.strip() in mob:
+                        qc_results.append(r)
+
+                if not qc_results:
+                    st.warning("No matching online reservations found.")
+                else:
+                    for qr in qc_results:
+                        qr_status = qr.get("status", "")
+                        qr_bqms = qr.get("bqms_number", "")
+                        is_arrived = qr_status == "ARRIVED"
+                        pri_icon = "⭐" if qr.get("priority") == "priority" else ""
+
+                        # Card
+                        arr_badge = ""
+                        if is_arrived:
+                            arr_time = qr.get("arrived_at", "")
+                            if arr_time:
+                                try:
+                                    at = datetime.fromisoformat(arr_time)
+                                    arr_badge = f' · Arrived {at.strftime("%I:%M %p")}'
+                                except:
+                                    arr_badge = " · Arrived"
+                            else:
+                                arr_badge = " · Arrived"
+
+                        st.markdown(f"""<div class="sss-card" style="border-left:4px solid {'#22c55e' if is_arrived else '#f59e0b'};">
+                            <span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{qr.get('res_num','')}</span>
+                            {pri_icon}<br/>
+                            <strong>{qr.get('cat_icon','')} {qr['last_name']}, {qr['first_name']} {qr.get('mi','')}</strong><br/>
+                            <span style="font-size:12px;opacity:.6;">{qr.get('category','')} → {qr.get('service','')}</span>
+                            {f'<br/><span style="font-size:11px;opacity:.5;">📱 {qr["mobile"]}</span>' if qr.get('mobile') else ''}
+                            <br/><span style="font-size:11px;font-weight:700;color:{'#22c55e' if is_arrived else '#f59e0b'};">
+                            {STATUS_LABELS.get(qr_status, qr_status)}{arr_badge}</span>
+                            {f'<br/><span style="font-size:13px;font-weight:900;color:#22B8CF;">BQMS: {qr_bqms}</span>' if qr_bqms else ''}
+                        </div>""", unsafe_allow_html=True)
+
+                        if qr_status == "RESERVED" and not qr_bqms:
+                            if st.button(f"✅ Confirm Arrival — {qr.get('res_num','')}",
+                                         key=f"qc_{qr['id']}", type="primary",
+                                         use_container_width=True):
+                                quick_checkin(qr["id"])
+                                st.success(f"✅ {qr.get('res_num','')} checked in!")
+                                st.rerun()
+                        elif is_arrived and not qr_bqms:
+                            st.info(f"Already checked in. Waiting for BQMS# assignment.")
+                        elif qr_bqms:
+                            st.info(f"Already has BQMS# {qr_bqms}.")
+
+    # ═══════════════════════════════════════════════════
+    #  V2.3.0 — BATCH ASSIGN (Staff + TH)
+    # ═══════════════════════════════════════════════════
+    if can_edit_queue and role != "kiosk":
+        batch_time_str = branch.get("batch_assign_time", "08:00")
+        batch_logs = get_batch_log_today()
+        assigned_cats = {bl["category_id"] for bl in batch_logs}
+
+        # Count unassigned per category
+        unassigned_by_cat = {}
+        for cat in cats:
+            cid = cat["id"]
+            cnt = len([e for e in queue
+                       if e.get("category_id") == cid
+                       and not e.get("bqms_number")
+                       and e.get("status") not in TERMINAL])
+            if cnt > 0:
+                unassigned_by_cat[cid] = cnt
+
+        total_unassigned = sum(unassigned_by_cat.values())
+
+        with st.expander(f"🎫 Batch Assign BQMS ({total_unassigned} pending · cutoff {batch_time_str})"):
+            st.caption("Assign BQMS# to all checked-in and reserved members at once. "
+                       "Priority: ⭐ Arrived → Regular Arrived → ⭐ Reserved → Regular Reserved.")
+
+            # Guard cap display per category
+            st.markdown("**📊 Queue Status per Category**")
+            for cat in cats:
+                cid = cat["id"]
+                arrived_cnt = len([e for e in queue if e.get("category_id") == cid and e.get("status") == "ARRIVED" and not e.get("bqms_number")])
+                reserved_cnt = len([e for e in queue if e.get("category_id") == cid and e.get("status") == "RESERVED" and not e.get("bqms_number")])
+                s = sc.get(cid, {"remaining": 0, "cap": 0, "used": 0})
+                was_assigned = cid in assigned_cats
+                log_entry = next((bl for bl in batch_logs if bl["category_id"] == cid), None)
+
+                badge = ""
+                if was_assigned and log_entry:
+                    try:
+                        at = datetime.fromisoformat(log_entry["assigned_at"])
+                        badge = f' · ✅ Batch done at {at.strftime("%I:%M %p")} by {log_entry["assigned_by"]} ({log_entry["assigned_count"]})'
+                    except:
+                        badge = f' · ✅ Batch done ({log_entry["assigned_count"]})'
+
+                st.markdown(f"""{cat['icon']} **{cat.get('short_label', cat['label'])}** — """
+                            f"""🏢 {arrived_cnt} arrived · 📱 {reserved_cnt} reserved · """
+                            f"""🎫 {s['remaining']}/{s['cap']} slots left{badge}""")
+
+            st.markdown("---")
+
+            # Per-category batch assign buttons
+            st.markdown("**Per Category**")
+            for cat in cats:
+                cid = cat["id"]
+                was_assigned = cid in assigned_cats
+                cnt = unassigned_by_cat.get(cid, 0)
+                key_base = f"batch_{cid}"
+
+                if was_assigned:
+                    st.button(f"✅ {cat['icon']} {cat.get('short_label','')} — Done",
+                              key=key_base, disabled=True, use_container_width=True)
+                elif cnt == 0:
+                    st.button(f"{cat['icon']} {cat.get('short_label','')} — 0 pending",
+                              key=key_base, disabled=True, use_container_width=True)
+                else:
+                    # Confirmation flow
+                    if st.session_state.get(f"confirm_{key_base}"):
+                        st.warning(f"⚠️ Assign BQMS# to **{cnt} members** in {cat['label']}?")
+                        bc1, bc2 = st.columns(2)
+                        with bc1:
+                            if st.button(f"✅ Yes, Assign", key=f"y_{key_base}",
+                                         type="primary", use_container_width=True):
+                                fresh_q = get_queue_today()
+                                n, first, last = batch_assign_category(fresh_q, cat, user["display_name"])
+                                st.session_state[f"confirm_{key_base}"] = False
+                                if n > 0:
+                                    st.success(f"✅ Assigned {n} BQMS# ({first}–{last}) for {cat['label']}!")
+                                st.rerun()
+                        with bc2:
+                            if st.button("← Cancel", key=f"n_{key_base}",
+                                         use_container_width=True):
+                                st.session_state[f"confirm_{key_base}"] = False
+                                st.rerun()
+                    else:
+                        if st.button(f"🎫 {cat['icon']} {cat.get('short_label','')} — {cnt} pending",
+                                     key=key_base, use_container_width=True):
+                            st.session_state[f"confirm_{key_base}"] = True
+                            st.rerun()
+
+            # Batch Assign ALL button
+            if total_unassigned > 0 and len(assigned_cats) < len(cats):
+                st.markdown("---")
+                all_key = "batch_all"
+                if st.session_state.get(f"confirm_{all_key}"):
+                    st.warning(f"⚠️ Assign BQMS# to **ALL {total_unassigned} pending members** across all categories?")
+                    ba1, ba2 = st.columns(2)
+                    with ba1:
+                        if st.button("✅ Yes, Assign All", key=f"y_{all_key}",
+                                     type="primary", use_container_width=True):
+                            results = batch_assign_all(queue, cats, user["display_name"])
+                            st.session_state[f"confirm_{all_key}"] = False
+                            total_done = sum(r[0] for r in results.values())
+                            st.success(f"✅ Batch assigned {total_done} BQMS# across {len(results)} categories!")
+                            st.rerun()
+                    with ba2:
+                        if st.button("← Cancel", key=f"n_{all_key}",
+                                     use_container_width=True):
+                            st.session_state[f"confirm_{all_key}"] = False
+                            st.rerun()
+                else:
+                    if st.button(f"🎫 Batch Assign ALL Categories ({total_unassigned} pending)",
+                                 key=all_key, type="primary", use_container_width=True):
+                        st.session_state[f"confirm_{all_key}"] = True
+                        st.rerun()
+
     # ── Walk-in Registration ──
     if can_edit_queue:
         with st.expander("➕ Add Walk-in"):
@@ -297,7 +480,8 @@ elif tab == "queue":
                     wmi = st.text_input("M.I.", max_chars=2, key="wmi")
                 with wc2:
                     wmob = st.text_input("Mobile (optional)", key="wmob")
-                wpri = st.radio("Lane:", ["👤 Regular", "⭐ Priority"], horizontal=True, key="wpri")
+                wpri = st.radio("Lane:", ["👤 Regular", "⭐ Priority (Senior/PWD/Pregnant)"], horizontal=True, key="wpri")
+                st.caption("⭐ Priority = Senior Citizen, PWD, or Pregnant. Ask for valid ID/proof before selecting.")
 
                 wbqms = ""
                 if role != "kiosk" and w_cat:
@@ -509,10 +693,17 @@ elif tab == "queue":
 
                 # ── ARRIVED → Serving / Complete / Void ──
                 elif status == "ARRIVED":
+                    # V2.3.0: Priority verification reminder
+                    if r.get("priority") == "priority":
+                        st.markdown(f"""<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
+                            border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:11px;">
+                            ⭐ <b>Priority Lane</b> — Please verify: Senior Citizen ID, PWD ID, or proof of pregnancy.</div>""",
+                            unsafe_allow_html=True)
                     ac1, ac2, ac3 = st.columns(3)
                     with ac1:
                         if st.button("🔵 Serving", key=f"srv_{rid}", use_container_width=True):
-                            update_queue_entry(rid, status="SERVING")
+                            ts = now_pht().isoformat()
+                            update_queue_entry(rid, status="SERVING", serving_at=ts)
                             auto_update_now_serving(r)  # AUTO-UPDATE Now Serving
                             st.rerun()
                     with ac2:
@@ -905,10 +1096,37 @@ elif tab == "admin" and is_admin_role:
             bn = st.text_input("Branch Name", value=branch.get("name", ""))
             ba = st.text_input("Address", value=branch.get("address", ""))
             bh = st.text_input("Hours", value=branch.get("hours", ""))
+
+            st.markdown("---")
+            st.markdown("**⏰ V2.3.0 — Queue Operations Config**")
+
+            bt_val = branch.get("batch_assign_time", "08:00")
+            bt = st.text_input("Batch Assign Cutoff Time (HH:MM, 24h)",
+                               value=bt_val,
+                               help="Time when staff should run batch BQMS assignment. Default: 08:00")
+
+            plm_opts = ["integrated", "separate"]
+            plm_val = branch.get("priority_lane_mode", "integrated")
+            plm_idx = plm_opts.index(plm_val) if plm_val in plm_opts else 0
+            plm = st.selectbox("Priority Lane Mode",
+                               plm_opts,
+                               index=plm_idx,
+                               format_func=lambda x: "Integrated (single queue, priority gets lower #)" if x == "integrated"
+                                   else "Separate Lane (dedicated priority counter) — V3.0",
+                               help="Integrated: priority members get lower BQMS# in same line. "
+                                    "Separate: different BQMS series for priority (future feature).")
+
             if st.form_submit_button("💾 Save", type="primary"):
-                update_branch(name=bn, address=ba, hours=bh)
-                st.success("✅ Saved!")
-                st.rerun()
+                # Validate batch time format
+                import re as re_mod
+                if not re_mod.match(r'^\d{2}:\d{2}$', bt.strip()):
+                    st.error("Batch time must be HH:MM format (e.g., 08:00, 08:15).")
+                else:
+                    update_branch(name=bn, address=ba, hours=bh,
+                                  batch_assign_time=bt.strip(),
+                                  priority_lane_mode=plm)
+                    st.success("✅ Saved!")
+                    st.rerun()
 
 # ═══════════════════════════════════════════════════
 #  DASHBOARD TAB
@@ -985,7 +1203,7 @@ elif tab == "dash" and role in ("th", "staff", "bh", "dh"):
     w = csv.writer(out)
     w.writerow(["Date", "Res#", "Source", "Last", "First", "Category", "Service",
                 "Status", "BQMS#", "BQMS_Prev", "Mobile", "Priority",
-                "Issued", "Arrived", "Completed", "Cancelled_At",
+                "Issued", "Arrived", "Serving_At", "Completed", "Cancelled_At",
                 "Void_Reason", "Voided_By", "Voided_At", "Expired_At"])
     for r in dash_q:
         w.writerow([
@@ -994,7 +1212,8 @@ elif tab == "dash" and role in ("th", "staff", "bh", "dh"):
             r.get("category", ""), r.get("service", ""),
             r.get("status", ""), r.get("bqms_number", ""), r.get("bqms_prev", ""),
             r.get("mobile", ""), r.get("priority", ""),
-            r.get("issued_at", ""), r.get("arrived_at", ""), r.get("completed_at", ""),
+            r.get("issued_at", ""), r.get("arrived_at", ""), r.get("serving_at", ""),
+            r.get("completed_at", ""),
             r.get("cancelled_at", ""),
             r.get("void_reason", ""), r.get("voided_by", ""), r.get("voided_at", ""),
             r.get("expired_at", ""),
