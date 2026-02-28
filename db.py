@@ -3,6 +3,7 @@
  MabiliSSS Queue — Database Layer V2.3.0-P2 (Supabase)
  Shared by member_app.py and staff_app.py
  All times in PHT (UTC+8)
+ © RPTayo / SSS-MND 2026
 ═══════════════════════════════════════════════════════════
 """
 
@@ -28,8 +29,49 @@ def today_iso():
 def today_mmdd():
     return today_pht().strftime("%m%d")
 
-# ── SSS Official Logo ──
-SSS_LOGO = "https://upload.wikimedia.org/wikipedia/commons/thumb/9/90/Social_Security_System_%28Philippines%29_logo.svg/1200px-Social_Security_System_%28Philippines%29_logo.svg.png"
+# ── SSS Logo — dynamic from branch_config, fallback to default ──
+SSS_LOGO_DEFAULT = "https://upload.wikimedia.org/wikipedia/commons/thumb/9/90/Social_Security_System_%28Philippines%29_logo.svg/1200px-Social_Security_System_%28Philippines%29_logo.svg.png"
+# Accessed via get_logo() after branch is loaded — see below
+
+def get_logo(branch=None):
+    """Return logo URL: branch_config.logo_url > default constant."""
+    if branch:
+        url = (branch.get("logo_url") or "").strip()
+        if url:
+            return url
+    return SSS_LOGO_DEFAULT
+
+# For backward compat — used in imports (resolved at render time via get_logo)
+SSS_LOGO = SSS_LOGO_DEFAULT
+
+# ── Icon Library for category setup ──
+ICON_LIBRARY = [
+    ("📋", "General / Default"),
+    ("💰", "Money / Payments / Collections"),
+    ("🏦", "Loans / Financial"),
+    ("🎓", "Education / Scholarship"),
+    ("🏥", "Medical / Sickness / Maternity"),
+    ("⚰️", "Death / Funeral"),
+    ("👴", "Retirement / Pension"),
+    ("♿", "Disability / PWD"),
+    ("👤", "Membership / Registration"),
+    ("🏢", "Employers / Compliance"),
+    ("📄", "Documents / Records / ID"),
+    ("🔄", "Updates / Changes / Correction"),
+    ("⭐", "Priority / Courtesy / VIP"),
+    ("⚡", "Fast Lane / Express"),
+    ("📱", "Digital / Online / E-Services"),
+    ("🤝", "Partnership / MOA"),
+    ("📢", "Inquiry / Information"),
+    ("🛡️", "Insurance / Coverage"),
+    ("👶", "Maternity / Paternity"),
+    ("🔧", "Technical / Support"),
+    ("📊", "Reports / Analytics"),
+    ("🏠", "Housing / Real Estate"),
+    ("💼", "Employment / HR"),
+    ("🌐", "International / OFW"),
+    ("🎯", "Special Programs"),
+]
 
 # ── Supabase Connection ──
 def get_supabase():
@@ -73,7 +115,7 @@ def get_branch_cached():
     r = sb.table("branch_config").select("*").eq("id", "main").execute()
     if r.data:
         return r.data[0]
-    return {"id": "main", "name": "SSS Gingoog Branch", "address": "", "hours": "",
+    return {"id": "main", "name": "SSS-MND Branch", "address": "", "hours": "",
             "announcement": "", "o_stat": "online"}
 
 def get_branch():

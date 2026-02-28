@@ -1,7 +1,7 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Staff Console V2.3.0 (Protected)
- © RPT / SSS Gingoog Branch 2026
+ MabiliSSS Queue — Staff Console V2.3.0-P2 (Protected)
+ © RPTayo / SSS-MND 2026
 ═══════════════════════════════════════════════════════════
 """
 
@@ -29,7 +29,7 @@ from db import (
     get_batch_log_today,
     swap_category_order, swap_service_order,
     get_category_groups, get_services_for_category,
-    is_reservation_open, format_time_12h,
+    is_reservation_open, format_time_12h, get_logo, ICON_LIBRARY,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED,
     ROLES, ROLE_LABELS, ROLE_ICONS
 )
@@ -135,6 +135,7 @@ if "staff_expired_run" not in st.session_state:
 
 # ── Load data ──
 branch = get_branch()
+logo_url = get_logo(branch)
 cats = get_categories_with_services()
 queue = get_queue_today()
 bqms_state = get_bqms_state()
@@ -858,7 +859,14 @@ elif tab == "admin" and is_admin_role:
                     ec1, ec2 = st.columns(2)
                     with ec1:
                         new_label = st.text_input("Label", value=cat["label"], key=f"cl_{cat['id']}")
-                        new_icon = st.text_input("Icon (emoji)", value=cat["icon"], key=f"ci_{cat['id']}")
+                        # Icon picker from library
+                        icon_vals = [ic[0] for ic in ICON_LIBRARY]
+                        icon_labels = [f"{ic[0]} {ic[1]}" for ic in ICON_LIBRARY]
+                        cur_icon_idx = icon_vals.index(cat["icon"]) if cat["icon"] in icon_vals else 0
+                        new_icon = st.selectbox("Icon", range(len(ICON_LIBRARY)), index=cur_icon_idx,
+                                                format_func=lambda i: icon_labels[i],
+                                                key=f"ci_{cat['id']}")
+                        new_icon = icon_vals[new_icon]
                         new_short = st.text_input("Short Label", value=cat.get("short_label", ""), key=f"cs_{cat['id']}")
                     with ec2:
                         new_avg = st.number_input("Avg Time (min)", value=cat["avg_time"], min_value=1, key=f"ca_{cat['id']}")
@@ -890,8 +898,15 @@ elif tab == "admin" and is_admin_role:
                                                    key=f"cgl_{cat['id']}",
                                                    placeholder="e.g., OTC Retirement / Death / Funeral")
                     with gc2:
-                        new_gicon = st.text_input("Group Icon", value=cat.get("group_icon", "") or "",
-                                                  key=f"cgi_{cat['id']}", placeholder="e.g., 🏛️")
+                        # Group icon picker
+                        gicon_vals = [""] + [ic[0] for ic in ICON_LIBRARY]
+                        gicon_labels = ["(none)"] + [f"{ic[0]} {ic[1]}" for ic in ICON_LIBRARY]
+                        cur_gicon = cat.get("group_icon", "") or ""
+                        cur_gicon_idx = gicon_vals.index(cur_gicon) if cur_gicon in gicon_vals else 0
+                        new_gicon_i = st.selectbox("Group Icon", range(len(gicon_vals)), index=cur_gicon_idx,
+                                                    format_func=lambda i: gicon_labels[i],
+                                                    key=f"cgi_{cat['id']}")
+                        new_gicon = gicon_vals[new_gicon_i]
                         lt_opts = ["single", "regular", "courtesy"]
                         lt_idx = lt_opts.index(lt) if lt in lt_opts else 0
                         new_lt = st.selectbox("Lane Type", lt_opts, index=lt_idx, key=f"clt_{cat['id']}",
@@ -938,7 +953,11 @@ elif tab == "admin" and is_admin_role:
             with ac1:
                 nc_id = st.text_input("Category ID (unique, lowercase)", placeholder="e.g., loans_regular")
                 nc_label = st.text_input("Full Label", placeholder="e.g., Loans - Regular Lane")
-                nc_icon = st.text_input("Icon (emoji)", value="📋")
+                # Icon picker from library
+                nc_icon_idx = st.selectbox("Icon", range(len(ICON_LIBRARY)),
+                                           format_func=lambda i: f"{ICON_LIBRARY[i][0]} {ICON_LIBRARY[i][1]}",
+                                           key="nc_icon_sel")
+                nc_icon = ICON_LIBRARY[nc_icon_idx][0]
             with ac2:
                 nc_short = st.text_input("Short Label", placeholder="e.g., Loans-Reg")
                 nc_avg = st.number_input("Avg Service Time (min)", value=10, min_value=1)
@@ -961,7 +980,10 @@ elif tab == "admin" and is_admin_role:
                 nc_gid = st.text_input("Group ID", placeholder="e.g., grp_otc (empty = standalone)", key="nc_gid")
                 nc_glabel = st.text_input("Group Label", placeholder="e.g., OTC Retirement / Death / Funeral", key="nc_gl")
             with ngc2:
-                nc_gicon = st.text_input("Group Icon", placeholder="e.g., 🏛️", key="nc_gi")
+                nc_gicon_idx = st.selectbox("Group Icon", range(len(ICON_LIBRARY) + 1),
+                                            format_func=lambda i: "(none)" if i == 0 else f"{ICON_LIBRARY[i-1][0]} {ICON_LIBRARY[i-1][1]}",
+                                            key="nc_gi_sel")
+                nc_gicon = "" if nc_gicon_idx == 0 else ICON_LIBRARY[nc_gicon_idx - 1][0]
                 nc_lt = st.selectbox("Lane Type", ["single", "regular", "courtesy"], key="nc_lt",
                                      format_func=lambda x: {"single": "Single (standalone)",
                                                              "regular": "Regular Lane",
@@ -1201,8 +1223,16 @@ elif tab == "admin" and is_admin_role:
             bh = st.text_input("Operating Hours (display)", value=branch.get("hours", ""),
                                help="Shown on member portal header. e.g., Mon-Fri 8AM-5PM")
 
+            st.markdown("**🖼️ Branch Logo**")
+            st.caption("Paste a direct image URL (PNG/JPG). Use a publicly accessible link — e.g., from Google Drive (set to 'Anyone with link'), Imgur, or any hosted image. Leave empty for default SSS logo.")
+            cur_logo = branch.get("logo_url", "") or ""
+            new_logo = st.text_input("Logo URL", value=cur_logo,
+                                     placeholder="https://drive.google.com/... or https://i.imgur.com/...")
+            if new_logo.strip():
+                st.image(new_logo.strip(), width=64, caption="Preview")
+
             if st.form_submit_button("💾 Save Branch Info", type="primary"):
-                update_branch(name=bn, address=ba, hours=bh)
+                update_branch(name=bn, address=ba, hours=bh, logo_url=new_logo.strip())
                 st.success("✅ Branch info saved!")
                 st.rerun()
 
@@ -1221,10 +1251,13 @@ elif tab == "admin" and is_admin_role:
             plm_opts = ["integrated", "separate"]
             plm_val = branch.get("priority_lane_mode", "integrated")
             plm_idx = plm_opts.index(plm_val) if plm_val in plm_opts else 0
-            plm = st.selectbox("Priority Lane Mode", plm_opts, index=plm_idx,
-                               format_func=lambda x: "Integrated (priority gets lower # in same queue)" if x == "integrated"
-                                   else "Separate Lane (dedicated priority counter)",
-                               help="Integrated: priority members get lower BQMS# in same line. Separate: different counters.")
+            plm = st.selectbox("Priority Lane Mode (for single-lane categories only)", plm_opts, index=plm_idx,
+                               format_func=lambda x: "Integrated — priority gets lower # in same queue (default)" if x == "integrated"
+                                   else "Separate — no priority radio shown (use Grouped Lanes instead)",
+                               help="For SINGLE-lane (ungrouped) categories only.\n\n"
+                                    "• Integrated: members can self-select Priority via radio button → priority gets lower BQMS# in same series.\n\n"
+                                    "• Separate: hides the priority radio. If you need separate priority queues, "
+                                    "use Lane Grouping (Regular + Courtesy lanes) which gives each lane its own BQMS series.")
 
             if st.form_submit_button("💾 Save Queue Config", type="primary"):
                 import re as re_mod
@@ -1440,5 +1473,5 @@ elif tab == "dash" and role in ("th", "staff", "bh", "dh"):
 # ═══════════════════════════════════════════════════
 st.markdown("---")
 st.markdown(f"""<div style="text-align:center;font-size:10px;opacity:.3;padding:8px;">
-    RPT / SSS Gingoog Branch · MabiliSSS Queue {VER}
+    RPTayo / SSS-MND · MabiliSSS Queue {VER}
 </div>""", unsafe_allow_html=True)

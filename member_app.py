@@ -1,7 +1,7 @@
 """
 ═══════════════════════════════════════════════════════════
  MabiliSSS Queue — Member Portal V2.3.0-P2 (Public)
- © RPT / SSS Gingoog Branch 2026
+ © RPTayo / SSS-MND 2026
 ═══════════════════════════════════════════════════════════
 """
 
@@ -15,7 +15,7 @@ from db import (
     validate_mobile_ph, gen_id, extract_bqms_num,
     count_arrived_in_category, count_reserved_position, calc_est_wait,
     get_category_groups, get_services_for_category,
-    is_reservation_open, format_time_12h,
+    is_reservation_open, format_time_12h, get_logo,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED
 )
 
@@ -102,13 +102,16 @@ if screen == "tracker":
 o_stat = branch.get("o_stat", "online")
 is_open = o_stat != "offline"
 
+# Dynamic logo: use branch config if set, fallback to default
+logo_url = get_logo(branch)
+
 # ═══════════════════════════════════════════════════
 #  HEADER
 # ═══════════════════════════════════════════════════
 st.markdown(f"""<div class="sss-header">
     <div style="display:flex;justify-content:space-between;align-items:center;">
         <div style="display:flex;align-items:center;gap:12px;">
-            <img src="{SSS_LOGO}" width="44" height="44"
+            <img src="{logo_url}" width="44" height="44"
                  style="border-radius:8px;background:#fff;padding:2px;"
                  onerror="this.style.display='none'"/>
             <div><h2>MabiliSSS Queue</h2>
@@ -140,6 +143,11 @@ if _ann:
 if not _ar_ok:
     if st.button("🔄 Refresh Page", type="primary", use_container_width=True):
         st.rerun()
+
+# ── Persistent 🏠 Home button (every screen except home) ──
+if screen != "home":
+    if st.button("🏠 Home", key="nav_home"):
+        go("home")
 
 # ═══════════════════════════════════════════════════
 #  HOME
@@ -463,18 +471,24 @@ elif screen == "member_form":
                     pri_confirmed = st.checkbox("✅ I qualify and will present proof at the counter.", key="pri_confirm")
 
                 elif lt == "single":
-                    # Single-lane category: show priority radio (backward-compatible)
-                    pri = st.radio("Lane:", ["👤 Regular", "⭐ Priority (Senior/PWD/Pregnant)"], horizontal=True)
-                    if "Priority" in pri:
-                        pri_value = "priority"
-                        st.markdown("""<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
-                            border-radius:8px;padding:10px 14px;margin:6px 0;font-size:12px;">
-                            ⚠️ <b>Priority Lane — Verification Required</b><br/><br/>
-                            Reserved for: 👴 <b>Senior Citizens</b> (60+) · ♿ <b>PWD</b> · 🤰 <b>Pregnant Women</b><br/><br/>
-                            📋 You will be asked to present <b>valid proof at the counter</b>.<br/><br/>
-                            ❌ <b>If you cannot present valid proof, you will be moved to the Regular Lane.</b>
-                        </div>""", unsafe_allow_html=True)
-                        pri_confirmed = st.checkbox("✅ I qualify and will present proof at the counter.", key="pri_confirm_s")
+                    # Single-lane category: behavior depends on branch priority_lane_mode
+                    plm = branch.get("priority_lane_mode", "integrated")
+                    if plm == "integrated":
+                        # Integrated: show priority radio — priority gets lower BQMS # in same queue
+                        pri = st.radio("Lane:", ["👤 Regular", "⭐ Priority (Senior/PWD/Pregnant)"], horizontal=True)
+                        if "Priority" in pri:
+                            pri_value = "priority"
+                            st.markdown("""<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
+                                border-radius:8px;padding:10px 14px;margin:6px 0;font-size:12px;">
+                                ⚠️ <b>Priority Lane — Verification Required</b><br/><br/>
+                                Reserved for: 👴 <b>Senior Citizens</b> (60+) · ♿ <b>PWD</b> · 🤰 <b>Pregnant Women</b><br/><br/>
+                                📋 You will be asked to present <b>valid proof at the counter</b>.<br/><br/>
+                                ❌ <b>If you cannot present valid proof, you will be moved to the Regular Lane.</b>
+                            </div>""", unsafe_allow_html=True)
+                            pri_confirmed = st.checkbox("✅ I qualify and will present proof at the counter.", key="pri_confirm_s")
+                    else:
+                        # Separate: no radio — inform the guard at the branch for priority routing
+                        st.caption("💡 Senior Citizens, PWD, and Pregnant Women: Please inform the guard at the branch for priority accommodation.")
                 # For "regular" lane_type, no radio needed — always regular
 
                 st.markdown("**🔒 Data Privacy (RA 10173)**")
@@ -554,7 +568,7 @@ elif screen == "ticket":
     else:
         st.markdown('<div style="text-align:center;"><span style="font-size:48px;">✅</span><h2 style="color:#22c55e;">Slot Reserved!</h2></div>', unsafe_allow_html=True)
         st.markdown(f"""<div class="sss-card" style="border-top:4px solid #3399CC;text-align:center;">
-            <img src="{SSS_LOGO}" width="32"
+            <img src="{logo_url}" width="32"
                  style="border-radius:6px;background:#fff;padding:2px;margin-bottom:4px;"
                  onerror="this.style.display='none'"/>
             <div style="font-size:11px;opacity:.5;letter-spacing:2px;">MABILISSS QUEUE — {branch.get('name','').upper()}</div>
@@ -677,7 +691,7 @@ elif screen == "tracker":
         # ── Entry card ──
         status_color = "#22B8CF" if has_bqms else "#3399CC"
         st.markdown(f"""<div class="sss-card" style="border-top:4px solid {status_color};text-align:center;">
-            <img src="{SSS_LOGO}" width="28"
+            <img src="{logo_url}" width="28"
                  style="border-radius:6px;background:#fff;padding:2px;margin-bottom:4px;"
                  onerror="this.style.display='none'"/>
             <div style="font-size:11px;opacity:.5;">{branch.get('name','').upper()}</div>
@@ -763,14 +777,8 @@ elif screen == "tracker":
 
                     st.markdown(f"""<div class="sss-alert sss-alert-yellow">
                         ⏳ <strong>Waiting for BQMS Number</strong><br/>
-                        BQMS numbers assigned at <b>{batch_time} AM</b>. Members at the branch are served first.<br/>
-                        <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos}</b> — {at_branch} member(s) already at the branch will be ahead of you.</span>
-                    </div>""", unsafe_allow_html=True)
-
-                    st.markdown(f"""<div class="sss-card" style="border-left:4px solid #22c55e;">
-                        💡 <strong>Early Bird Tip:</strong> Arrive before {batch_time} AM and check in with the guard to get
-                        <b>priority over online reservations</b>!<br/>
-                        <span style="font-size:11px;opacity:.6;">⚠️ Position may change as more members arrive.</span>
+                        Your queue number will be assigned at <b>{batch_time} AM</b> when the branch opens.<br/>
+                        <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos}</b> for this category. No need to rush — your slot is secured!</span>
                     </div>""", unsafe_allow_html=True)
 
         # ── Action buttons ──
@@ -823,5 +831,5 @@ elif screen == "tracker":
 # ═══════════════════════════════════════════════════
 st.markdown("---")
 st.markdown(f"""<div style="text-align:center;font-size:10px;opacity:.3;padding:8px;">
-    RPT / SSS Gingoog Branch · MabiliSSS Queue {VER}
+    RPTayo / SSS-MND · MabiliSSS Queue {VER}
 </div>""", unsafe_allow_html=True)
