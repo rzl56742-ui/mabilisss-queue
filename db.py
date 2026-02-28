@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Database Layer V2.3.0 (Supabase)
+ MabiliSSS Queue — Database Layer V2.3.0-P2 (Supabase)
  Shared by member_app.py and staff_app.py
  All times in PHT (UTC+8)
 ═══════════════════════════════════════════════════════════
@@ -130,16 +130,25 @@ def update_branch(**kwargs):
 #  CATEGORIES — FULL CRUD
 # ═══════════════════════════════════════════════════
 def add_category(cat_id, label, icon, short_label, avg_time, cap, sort_order,
-                 bqms_prefix="", bqms_range_start=None, bqms_range_end=None):
+                 bqms_prefix="", bqms_range_start=None, bqms_range_end=None,
+                 description="", group_id=None, group_label="", group_icon="", lane_type="single"):
     sb = get_supabase()
-    sb.table("categories").insert({
+    row = {
         "id": cat_id, "label": label, "icon": icon,
         "short_label": short_label, "avg_time": avg_time,
         "cap": cap, "sort_order": sort_order,
         "bqms_prefix": bqms_prefix or "",
         "bqms_range_start": bqms_range_start,
         "bqms_range_end": bqms_range_end,
-    }).execute()
+    }
+    # V2.3.0-P2 fields (safe: defaults if column missing)
+    row["description"] = description or ""
+    if group_id:
+        row["group_id"] = group_id
+    row["group_label"] = group_label or ""
+    row["group_icon"] = group_icon or ""
+    row["lane_type"] = lane_type or "single"
+    sb.table("categories").insert(row).execute()
     try:
         sb.table("bqms_state").insert({"category_id": cat_id}).execute()
     except:
@@ -171,11 +180,12 @@ def has_active_entries(cat_id):
 # ═══════════════════════════════════════════════════
 #  SERVICES (Sub-Categories) — FULL CRUD
 # ═══════════════════════════════════════════════════
-def add_service(svc_id, category_id, label, sort_order=0):
+def add_service(svc_id, category_id, label, sort_order=0, description=""):
     sb = get_supabase()
     sb.table("services").insert({
         "id": svc_id, "category_id": category_id,
-        "label": label, "sort_order": sort_order
+        "label": label, "sort_order": sort_order,
+        "description": description or "",
     }).execute()
     invalidate_categories()
 
@@ -666,6 +676,161 @@ def reset_password(user_id, new_password):
 
 def update_password(user_id, new_password):
     reset_password(user_id, new_password)
+
+# ═══════════════════════════════════════════════════
+#  V2.3.0-P2 — CATEGORY GROUPING HELPERS
+# ═══════════════════════════════════════════════════
+def get_category_groups(cats):
+    """Organize categories into display groups for the member portal.
+    Returns list of group dicts:
+      {group_id, group_label, group_icon, lanes: [cat_list], is_single}
+    Groups are sorted by the lowest sort_order among their member categories.
+    Single/ungrouped categories become their own group."""
+    groups = {}
+    for c in cats:
+        gid = c.get("group_id") or c["id"]  # ungrouped → use cat id as group
+        if gid not in groups:
+            groups[gid] = {
+                "group_id": gid,
+                "group_label": c.get("group_label") or c["label"],
+                "group_icon": c.get("group_icon") or c["icon"],
+                "lanes": [],
+                "is_single": not c.get("group_id"),
+                "min_sort": c.get("sort_order", 999),
+            }
+        groups[gid]["lanes"].append(c)
+        groups[gid]["min_sort"] = min(groups[gid]["min_sort"], c.get("sort_order", 999))
+    # Sort groups by their minimum sort_order
+    return sorted(groups.values(), key=lambda g: g["min_sort"])
+
+
+def get_paired_regular(cats, cat):
+    """For a courtesy lane category, find its paired regular lane category."""
+    gid = cat.get("group_id")
+    if not gid:
+        return None
+    return next((c for c in cats if c.get("group_id") == gid
+                 and c.get("lane_type") == "regular"), None)
+
+
+def get_services_for_category(cats, cat, all_services=None):
+    """Get services for a category. Courtesy lanes inherit from their paired Regular lane."""
+    if all_services is None:
+        all_services = get_services()
+    cat_id = cat["id"]
+    lane = cat.get("lane_type", "single")
+    if lane == "courtesy":
+        # Inherit services from paired regular lane
+        regular = get_paired_regular(cats, cat)
+        if regular:
+            cat_id = regular["id"]
+    return [s for s in all_services if s.get("category_id") == cat_id]
+
+
+def get_group_slot_info(cats, queue_list, group):
+    """Get combined slot info for a group (all lanes).
+    Returns dict: {regular: {cat, used, cap, remaining}, courtesy: {cat, used, cap, remaining}, total_remaining}"""
+    info = {"lanes": [], "total_remaining": 0}
+    for c in group["lanes"]:
+        used = count_daily_by_category(queue_list, c["id"])
+        cap = c.get("cap", 50)
+        rem = max(0, cap - used)
+        lane_info = {
+            "cat": c, "used": used, "cap": cap, "remaining": rem,
+            "lane_type": c.get("lane_type", "single"),
+        }
+        info["lanes"].append(lane_info)
+        info["total_remaining"] += rem
+    return info
+
+
+# ═══════════════════════════════════════════════════
+#  V2.3.0-P2 — REORDER HELPERS
+# ═══════════════════════════════════════════════════
+def swap_category_order(cat_id_a, cat_id_b):
+    """Swap sort_order of two categories."""
+    cats = get_categories()
+    a = next((c for c in cats if c["id"] == cat_id_a), None)
+    b = next((c for c in cats if c["id"] == cat_id_b), None)
+    if a and b:
+        sb = get_supabase()
+        sb.table("categories").update({"sort_order": b["sort_order"]}).eq("id", cat_id_a).execute()
+        sb.table("categories").update({"sort_order": a["sort_order"]}).eq("id", cat_id_b).execute()
+        invalidate_categories()
+
+
+def swap_service_order(svc_id_a, svc_id_b):
+    """Swap sort_order of two services."""
+    svcs = get_services()
+    a = next((s for s in svcs if s["id"] == svc_id_a), None)
+    b = next((s for s in svcs if s["id"] == svc_id_b), None)
+    if a and b:
+        sb = get_supabase()
+        sb.table("services").update({"sort_order": b["sort_order"]}).eq("id", svc_id_a).execute()
+        sb.table("services").update({"sort_order": a["sort_order"]}).eq("id", svc_id_b).execute()
+        invalidate_categories()
+
+
+# ═══════════════════════════════════════════════════
+#  V2.3.0-P2 — RESERVATION TIME GATE
+# ═══════════════════════════════════════════════════
+def is_reservation_open(branch):
+    """Check if online reservations are currently open.
+    Returns (is_open, reason_msg).
+    Checks: test_mode → working_day → holiday → time window."""
+    # Test mode bypasses all restrictions
+    if branch.get("test_mode"):
+        return True, "🧪 Test mode active"
+
+    now = now_pht()
+    today = now.date()
+    day_name = today.strftime("%a")  # Mon, Tue, etc.
+
+    # Check working days
+    working = [d.strip() for d in (branch.get("working_days", "Mon,Tue,Wed,Thu,Fri") or "Mon,Tue,Wed,Thu,Fri").split(",") if d.strip()]
+    if day_name not in working:
+        return False, f"Reservations are not available on {today.strftime('%A')}s. Working days: {', '.join(working)}."
+
+    # Check holidays
+    holidays_str = branch.get("holidays", "") or ""
+    if holidays_str.strip():
+        holiday_dates = [h.strip() for h in holidays_str.split(",") if h.strip()]
+        today_str = today.isoformat()
+        if today_str in holiday_dates:
+            return False, "Today is a holiday. Online reservations are closed."
+
+    # Check time window
+    open_t = branch.get("reservation_open_time", "06:00") or "06:00"
+    close_t = branch.get("reservation_close_time", "17:00") or "17:00"
+    try:
+        open_h, open_m = map(int, open_t.split(":"))
+        close_h, close_m = map(int, close_t.split(":"))
+    except (ValueError, AttributeError):
+        open_h, open_m = 6, 0
+        close_h, close_m = 17, 0
+
+    current_mins = now.hour * 60 + now.minute
+    open_mins = open_h * 60 + open_m
+    close_mins = close_h * 60 + close_m
+
+    if current_mins < open_mins:
+        return False, f"Online reservations open at {open_t} AM. Please come back later."
+    if current_mins >= close_mins:
+        return False, f"Online reservations closed at {close_t}. Please visit the branch directly."
+
+    return True, ""
+
+
+def format_time_12h(time_str):
+    """Convert HH:MM (24h) to 12h format. '08:00' → '8:00 AM', '15:30' → '3:30 PM'."""
+    try:
+        h, m = map(int, time_str.split(":"))
+        suffix = "AM" if h < 12 else "PM"
+        h12 = h if 1 <= h <= 12 else (h - 12 if h > 12 else 12)
+        return f"{h12}:{m:02d} {suffix}"
+    except (ValueError, AttributeError):
+        return time_str
+
 
 # ═══════════════════════════════════════════════════
 #  STATUS CONSTANTS

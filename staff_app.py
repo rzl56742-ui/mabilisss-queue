@@ -27,6 +27,9 @@ from db import (
     gen_id, hash_pw,
     batch_assign_category, batch_assign_all, quick_checkin,
     get_batch_log_today,
+    swap_category_order, swap_service_order,
+    get_category_groups, get_services_for_category,
+    is_reservation_open, format_time_12h,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED,
     ROLES, ROLE_LABELS, ROLE_ICONS
 )
@@ -463,12 +466,20 @@ elif tab == "queue":
                                        format_func=lambda i: cat_labels[i])
                 w_cat = cats[w_cat_i - 1] if w_cat_i > 0 else None
 
+                # Show category description if available
+                if w_cat and w_cat.get("description"):
+                    st.caption(f"ℹ️ {w_cat['description']}")
+
                 w_svc = None
                 if w_cat:
-                    svc_labels = ["-- None --"] + [s["label"] for s in w_cat.get("services", [])]
+                    # Use grouped services (courtesy inherits from regular)
+                    svcs_for_cat = get_services_for_category(cats, w_cat)
+                    svc_labels = ["-- None --"] + [
+                        f"{s['label']}" + (f" — {s['description']}" if s.get("description") else "")
+                        for s in svcs_for_cat]
                     w_svc_i = st.selectbox("Sub-service", range(len(svc_labels)),
                                            format_func=lambda i: svc_labels[i])
-                    w_svc = w_cat["services"][w_svc_i - 1] if w_svc_i > 0 else None
+                    w_svc = svcs_for_cat[w_svc_i - 1] if w_svc_i > 0 else None
 
                 wc1, wc2 = st.columns(2)
                 with wc1:
@@ -811,71 +822,107 @@ elif tab == "admin" and is_admin_role:
     atabs = st.tabs(["📋 Categories", "🔧 Sub-Categories", "📊 Daily Caps",
                      "👥 Users", "🏢 Branch"])
 
-    # ══════════ CATEGORIES (Full CRUD + BQMS Series) ══════════
+    # ══════════ CATEGORIES (Full CRUD + BQMS Series + Grouping) ══════════
     with atabs[0]:
         st.markdown("**Manage BQMS Categories**")
-        st.caption("Main transaction categories shown to members. Configure BQMS number series to prevent wrong assignments.")
+        st.caption("Main transaction categories shown to members. Configure BQMS series, lane grouping, and descriptions.")
 
-        for cat in cats:
+        for i, cat in enumerate(cats):
             rs = cat.get("bqms_range_start", "")
             re_ = cat.get("bqms_range_end", "")
             pfx = cat.get("bqms_prefix", "")
             range_txt = f" · Series: {pfx}{rs}–{pfx}{re_}" if rs and re_ else " · No series set"
+            lt = cat.get("lane_type", "single")
+            lt_badge = {"regular": "🟢 Regular", "courtesy": "⭐ Courtesy", "single": ""}.get(lt, "")
+            grp = cat.get("group_label", "")
+            grp_txt = f" · Group: {grp}" if grp else ""
 
-            with st.expander(f"{cat['icon']} {cat['label']} — Cap: {cat['cap']}{range_txt}"):
+            with st.expander(f"{cat['icon']} {cat['label']} — Cap: {cat['cap']}{range_txt}{grp_txt} {lt_badge}"):
+                # ── Reorder buttons (outside form) ──
+                mc1, mc2, mc3 = st.columns([1, 1, 6])
+                with mc1:
+                    if i > 0:
+                        if st.button("⬆️ Up", key=f"cup_{cat['id']}", use_container_width=True):
+                            swap_category_order(cat["id"], cats[i - 1]["id"])
+                            st.success("✅ Moved up!")
+                            st.rerun()
+                with mc2:
+                    if i < len(cats) - 1:
+                        if st.button("⬇️ Down", key=f"cdn_{cat['id']}", use_container_width=True):
+                            swap_category_order(cat["id"], cats[i + 1]["id"])
+                            st.success("✅ Moved down!")
+                            st.rerun()
+
+                # ── Edit form ──
                 with st.form(f"edit_cat_{cat['id']}"):
                     ec1, ec2 = st.columns(2)
                     with ec1:
-                        new_label = st.text_input("Label", value=cat["label"],
-                                                  key=f"cl_{cat['id']}")
-                        new_icon = st.text_input("Icon (emoji)", value=cat["icon"],
-                                                 key=f"ci_{cat['id']}")
-                        new_short = st.text_input("Short Label",
-                                                  value=cat.get("short_label", ""),
-                                                  key=f"cs_{cat['id']}")
+                        new_label = st.text_input("Label", value=cat["label"], key=f"cl_{cat['id']}")
+                        new_icon = st.text_input("Icon (emoji)", value=cat["icon"], key=f"ci_{cat['id']}")
+                        new_short = st.text_input("Short Label", value=cat.get("short_label", ""), key=f"cs_{cat['id']}")
                     with ec2:
-                        new_avg = st.number_input("Avg Time (min)", value=cat["avg_time"],
-                                                  min_value=1, key=f"ca_{cat['id']}")
-                        new_order = st.number_input("Sort Order",
-                                                    value=cat.get("sort_order", 0),
-                                                    min_value=0, key=f"co_{cat['id']}")
+                        new_avg = st.number_input("Avg Time (min)", value=cat["avg_time"], min_value=1, key=f"ca_{cat['id']}")
+                        new_order = st.number_input("Sort Order", value=cat.get("sort_order", 0), min_value=0, key=f"co_{cat['id']}")
+
+                    new_desc = st.text_input("Description (shown to members & staff)",
+                                             value=cat.get("description", "") or "",
+                                             key=f"cd_{cat['id']}",
+                                             placeholder="e.g., For retirement, death, and funeral benefit claims",
+                                             max_chars=150)
 
                     st.markdown("**BQMS Number Series**")
-                    st.caption("Set the numeric range for this category's BQMS numbers. Staff will get auto-suggestions within this range.")
                     bc1, bc2, bc3 = st.columns(3)
                     with bc1:
-                        new_pfx = st.text_input("Prefix (optional)",
-                                                value=pfx, key=f"cp_{cat['id']}",
-                                                placeholder="e.g., L-")
+                        new_pfx = st.text_input("Prefix", value=pfx, key=f"cp_{cat['id']}", placeholder="e.g., L-")
                     with bc2:
-                        new_rs = st.number_input("Range Start",
-                                                 value=rs if rs else 0,
-                                                 min_value=0, key=f"crs_{cat['id']}")
+                        new_rs = st.number_input("Range Start", value=rs if rs else 0, min_value=0, key=f"crs_{cat['id']}")
                     with bc3:
-                        new_re = st.number_input("Range End",
-                                                 value=re_ if re_ else 0,
-                                                 min_value=0, key=f"cre_{cat['id']}")
+                        new_re = st.number_input("Range End", value=re_ if re_ else 0, min_value=0, key=f"cre_{cat['id']}")
+
+                    st.markdown("**Lane Grouping** (pair Regular + Courtesy lanes)")
+                    gc1, gc2 = st.columns(2)
+                    with gc1:
+                        new_gid = st.text_input("Group ID", value=cat.get("group_id", "") or "",
+                                                key=f"cgid_{cat['id']}",
+                                                placeholder="e.g., grp_otc (same for paired lanes)",
+                                                help="Categories with the same Group ID are paired. Leave empty for standalone.")
+                        new_glabel = st.text_input("Group Label", value=cat.get("group_label", "") or "",
+                                                   key=f"cgl_{cat['id']}",
+                                                   placeholder="e.g., OTC Retirement / Death / Funeral")
+                    with gc2:
+                        new_gicon = st.text_input("Group Icon", value=cat.get("group_icon", "") or "",
+                                                  key=f"cgi_{cat['id']}", placeholder="e.g., 🏛️")
+                        lt_opts = ["single", "regular", "courtesy"]
+                        lt_idx = lt_opts.index(lt) if lt in lt_opts else 0
+                        new_lt = st.selectbox("Lane Type", lt_opts, index=lt_idx, key=f"clt_{cat['id']}",
+                                              format_func=lambda x: {"single": "Single (standalone)",
+                                                                      "regular": "Regular Lane",
+                                                                      "courtesy": "Courtesy Lane (inherits subcategories)"}.get(x, x))
+
+                    if new_lt == "courtesy":
+                        st.info("ℹ️ Courtesy Lane inherits subcategories from its paired Regular Lane in the same group.")
 
                     if st.form_submit_button("💾 Save Category", type="primary"):
                         upd = {
-                            "label": new_label.strip(),
-                            "icon": new_icon.strip(),
-                            "short_label": new_short.strip(),
-                            "avg_time": new_avg,
-                            "sort_order": new_order,
+                            "label": new_label.strip(), "icon": new_icon.strip(),
+                            "short_label": new_short.strip(), "avg_time": new_avg,
+                            "sort_order": new_order, "description": new_desc.strip(),
                             "bqms_prefix": new_pfx.strip(),
                             "bqms_range_start": new_rs if new_rs > 0 else None,
                             "bqms_range_end": new_re if new_re > 0 else None,
+                            "group_id": new_gid.strip() or None,
+                            "group_label": new_glabel.strip(),
+                            "group_icon": new_gicon.strip(),
+                            "lane_type": new_lt,
                         }
-                        # Validate range
                         if new_rs > 0 and new_re > 0 and new_rs >= new_re:
                             st.error("Range Start must be less than Range End.")
                         else:
                             update_category(cat["id"], **upd)
-                            st.success("✅ Updated!")
+                            st.success("✅ Category saved!")
                             st.rerun()
 
-                # Delete button OUTSIDE the form (LOGIC-06 fix)
+                # Delete (outside form)
                 if has_active_entries(cat["id"]):
                     st.warning("⚠️ Cannot delete — active queue entries exist today.")
                 else:
@@ -889,24 +936,36 @@ elif tab == "admin" and is_admin_role:
         with st.form("add_cat"):
             ac1, ac2 = st.columns(2)
             with ac1:
-                nc_id = st.text_input("Category ID (unique, lowercase)",
-                                      placeholder="e.g., loans_new")
-                nc_label = st.text_input("Full Label", placeholder="e.g., Salary Loans")
+                nc_id = st.text_input("Category ID (unique, lowercase)", placeholder="e.g., loans_regular")
+                nc_label = st.text_input("Full Label", placeholder="e.g., Loans - Regular Lane")
                 nc_icon = st.text_input("Icon (emoji)", value="📋")
             with ac2:
-                nc_short = st.text_input("Short Label", placeholder="e.g., SalLoans")
+                nc_short = st.text_input("Short Label", placeholder="e.g., Loans-Reg")
                 nc_avg = st.number_input("Avg Service Time (min)", value=10, min_value=1)
                 nc_cap = st.number_input("Daily Cap", value=50, min_value=1)
             nc_order = st.number_input("Sort Order", value=len(cats) + 1, min_value=0)
+            nc_desc = st.text_input("Description", placeholder="Short note for members & staff", max_chars=150)
 
             st.markdown("**BQMS Series**")
             nbc1, nbc2, nbc3 = st.columns(3)
             with nbc1:
                 nc_pfx = st.text_input("Prefix", value="", placeholder="optional")
             with nbc2:
-                nc_rs = st.number_input("Range Start", value=0, min_value=0)
+                nc_rs = st.number_input("Range Start", value=0, min_value=0, key="nc_rs")
             with nbc3:
-                nc_re = st.number_input("Range End", value=0, min_value=0)
+                nc_re = st.number_input("Range End", value=0, min_value=0, key="nc_re")
+
+            st.markdown("**Lane Grouping**")
+            ngc1, ngc2 = st.columns(2)
+            with ngc1:
+                nc_gid = st.text_input("Group ID", placeholder="e.g., grp_otc (empty = standalone)", key="nc_gid")
+                nc_glabel = st.text_input("Group Label", placeholder="e.g., OTC Retirement / Death / Funeral", key="nc_gl")
+            with ngc2:
+                nc_gicon = st.text_input("Group Icon", placeholder="e.g., 🏛️", key="nc_gi")
+                nc_lt = st.selectbox("Lane Type", ["single", "regular", "courtesy"], key="nc_lt",
+                                     format_func=lambda x: {"single": "Single (standalone)",
+                                                             "regular": "Regular Lane",
+                                                             "courtesy": "Courtesy Lane"}.get(x, x))
 
             if st.form_submit_button("➕ Add Category", type="primary"):
                 nid = nc_id.strip().lower().replace(" ", "_")
@@ -921,50 +980,91 @@ elif tab == "admin" and is_admin_role:
                                  nc_short.strip(), nc_avg, nc_cap, nc_order,
                                  nc_pfx.strip(),
                                  nc_rs if nc_rs > 0 else None,
-                                 nc_re if nc_re > 0 else None)
+                                 nc_re if nc_re > 0 else None,
+                                 description=nc_desc.strip(),
+                                 group_id=nc_gid.strip() or None,
+                                 group_label=nc_glabel.strip(),
+                                 group_icon=nc_gicon.strip(),
+                                 lane_type=nc_lt)
                     st.success(f"✅ Added {nc_label.strip()}!")
                     st.rerun()
 
     # ══════════ SUB-CATEGORIES ══════════
     with atabs[1]:
         st.markdown("**Manage Sub-Categories / Services**")
-        st.caption("Specific services under each category.")
+        st.caption("Specific services under each category. Courtesy Lanes automatically inherit subcategories from their paired Regular Lane.")
 
+        all_svcs = get_services()
         for cat in cats:
+            lt = cat.get("lane_type", "single")
+            # Courtesy lanes inherit — show read-only note
+            if lt == "courtesy":
+                paired = next((c for c in cats if c.get("group_id") == cat.get("group_id")
+                               and c.get("lane_type") == "regular"), None)
+                if paired:
+                    st.markdown(f"### {cat['icon']} {cat['label']} 🔗")
+                    st.info(f"↪ Inherits subcategories from **{paired['icon']} {paired['label']}**. Edit them there.")
+                    st.markdown("---")
+                    continue
+
             st.markdown(f"### {cat['icon']} {cat['label']}")
-            svcs = cat.get("services", [])
+            svcs = [s for s in all_svcs if s.get("category_id") == cat["id"]]
+            svcs.sort(key=lambda s: s.get("sort_order", 0))
+
             if not svcs:
                 st.caption("No sub-categories yet.")
-            for svc in svcs:
-                sc1, sc2, sc3 = st.columns([4, 1, 1])
+            for j, svc in enumerate(svcs):
+                sc1, sc2, sc3, sc4, sc5 = st.columns([3, 2, 0.5, 0.5, 0.5])
                 with sc1:
                     new_slabel = st.text_input("Label", value=svc["label"],
                                                key=f"sl_{svc['id']}",
                                                label_visibility="collapsed")
                 with sc2:
-                    if st.button("💾", key=f"ss_{svc['id']}"):
-                        if new_slabel.strip():
-                            update_service(svc["id"], label=new_slabel.strip())
-                            st.rerun()
+                    new_sdesc = st.text_input("Desc", value=svc.get("description", "") or "",
+                                              key=f"sdsc_{svc['id']}",
+                                              label_visibility="collapsed",
+                                              placeholder="Short description")
                 with sc3:
-                    if st.button("🗑️", key=f"sd_{svc['id']}"):
+                    if st.button("💾", key=f"ss_{svc['id']}", help="Save"):
+                        upd = {"label": new_slabel.strip()}
+                        upd["description"] = new_sdesc.strip()
+                        if new_slabel.strip():
+                            update_service(svc["id"], **upd)
+                            st.toast("✅ Saved!")
+                            st.rerun()
+                with sc4:
+                    # Reorder: swap with previous
+                    if j > 0:
+                        if st.button("⬆", key=f"sup_{svc['id']}", help="Move up"):
+                            swap_service_order(svc["id"], svcs[j - 1]["id"])
+                            st.toast("✅ Moved!")
+                            st.rerun()
+                    else:
+                        st.write("")
+                with sc5:
+                    if st.button("🗑️", key=f"sd_{svc['id']}", help="Delete"):
                         delete_service(svc["id"])
+                        st.toast("✅ Deleted!")
                         st.rerun()
 
             with st.form(f"add_svc_{cat['id']}"):
-                ns1, ns2 = st.columns([3, 1])
+                ns1, ns2, ns3 = st.columns([3, 2, 1])
                 with ns1:
                     new_svc_label = st.text_input("New sub-category",
                                                   placeholder="e.g., Calamity Loan",
                                                   key=f"nsv_{cat['id']}")
                 with ns2:
+                    new_svc_desc = st.text_input("Description",
+                                                 placeholder="Short note",
+                                                 key=f"nsvd_{cat['id']}")
+                with ns3:
                     if st.form_submit_button("➕ Add"):
                         label = new_svc_label.strip()
                         if label:
-                            # Service ID: category + UUID suffix to prevent collision (LOGIC-07 fix)
                             sid = f"{cat['id']}_{uuid.uuid4().hex[:8]}"
-                            add_service(sid, cat["id"], label, len(svcs) + 1)
-                            st.success("✅ Added!")
+                            add_service(sid, cat["id"], label, len(svcs) + 1,
+                                        description=new_svc_desc.strip())
+                            st.toast("✅ Added!")
                             st.rerun()
             st.markdown("---")
 
@@ -1092,41 +1192,144 @@ elif tab == "admin" and is_admin_role:
     # ══════════ BRANCH ══════════
     with atabs[4]:
         st.markdown("**🏢 Branch Configuration**")
-        with st.form("branch"):
+
+        # ── Basic Info ──
+        with st.form("branch_basic"):
+            st.markdown("**Branch Info**")
             bn = st.text_input("Branch Name", value=branch.get("name", ""))
             ba = st.text_input("Address", value=branch.get("address", ""))
-            bh = st.text_input("Hours", value=branch.get("hours", ""))
+            bh = st.text_input("Operating Hours (display)", value=branch.get("hours", ""),
+                               help="Shown on member portal header. e.g., Mon-Fri 8AM-5PM")
 
-            st.markdown("---")
-            st.markdown("**⏰ V2.3.0 — Queue Operations Config**")
+            if st.form_submit_button("💾 Save Branch Info", type="primary"):
+                update_branch(name=bn, address=ba, hours=bh)
+                st.success("✅ Branch info saved!")
+                st.rerun()
 
+        st.markdown("---")
+
+        # ── Queue Operations Config ──
+        with st.form("branch_ops"):
+            st.markdown("**⏰ Queue Operations Config**")
+
+            # Batch assign time
             bt_val = branch.get("batch_assign_time", "08:00")
-            bt = st.text_input("Batch Assign Cutoff Time (HH:MM, 24h)",
-                               value=bt_val,
-                               help="Time when staff should run batch BQMS assignment. Default: 08:00")
+            bt = st.text_input("Batch Assign Time (HH:MM, 24h)", value=bt_val,
+                               help="When staff runs batch BQMS assignment. Default: 08:00")
 
+            # Priority lane mode
             plm_opts = ["integrated", "separate"]
             plm_val = branch.get("priority_lane_mode", "integrated")
             plm_idx = plm_opts.index(plm_val) if plm_val in plm_opts else 0
-            plm = st.selectbox("Priority Lane Mode",
-                               plm_opts,
-                               index=plm_idx,
-                               format_func=lambda x: "Integrated (single queue, priority gets lower #)" if x == "integrated"
-                                   else "Separate Lane (dedicated priority counter) — V3.0",
-                               help="Integrated: priority members get lower BQMS# in same line. "
-                                    "Separate: different BQMS series for priority (future feature).")
+            plm = st.selectbox("Priority Lane Mode", plm_opts, index=plm_idx,
+                               format_func=lambda x: "Integrated (priority gets lower # in same queue)" if x == "integrated"
+                                   else "Separate Lane (dedicated priority counter)",
+                               help="Integrated: priority members get lower BQMS# in same line. Separate: different counters.")
 
-            if st.form_submit_button("💾 Save", type="primary"):
-                # Validate batch time format
+            if st.form_submit_button("💾 Save Queue Config", type="primary"):
                 import re as re_mod
                 if not re_mod.match(r'^\d{2}:\d{2}$', bt.strip()):
                     st.error("Batch time must be HH:MM format (e.g., 08:00, 08:15).")
                 else:
-                    update_branch(name=bn, address=ba, hours=bh,
-                                  batch_assign_time=bt.strip(),
-                                  priority_lane_mode=plm)
-                    st.success("✅ Saved!")
+                    update_branch(batch_assign_time=bt.strip(), priority_lane_mode=plm)
+                    st.success("✅ Queue config saved!")
                     st.rerun()
+
+        st.markdown("---")
+
+        # ── Reservation Hours ──
+        with st.form("branch_res_hours"):
+            st.markdown("**🕐 Online Reservation Hours**")
+            st.caption("Members can only make online reservations within this time window. Walk-ins at the branch are always accepted during operating hours.")
+
+            rh1, rh2 = st.columns(2)
+            with rh1:
+                rot = branch.get("reservation_open_time", "06:00") or "06:00"
+                res_open = st.text_input("Opening Time (HH:MM, 24h)", value=rot,
+                                         help="When online reservations open. Default: 06:00")
+            with rh2:
+                rct = branch.get("reservation_close_time", "17:00") or "17:00"
+                res_close = st.text_input("Closing Time (HH:MM, 24h)", value=rct,
+                                          help="When online reservations close. Default: 17:00")
+
+            if st.form_submit_button("💾 Save Reservation Hours", type="primary"):
+                import re as re_mod
+                ok = True
+                for tv, tn in [(res_open, "Opening"), (res_close, "Closing")]:
+                    if not re_mod.match(r'^\d{2}:\d{2}$', tv.strip()):
+                        st.error(f"{tn} time must be HH:MM format.")
+                        ok = False
+                if ok:
+                    update_branch(reservation_open_time=res_open.strip(),
+                                  reservation_close_time=res_close.strip())
+                    st.success(f"✅ Reservations: {format_time_12h(res_open.strip())} – {format_time_12h(res_close.strip())}")
+                    st.rerun()
+
+        st.markdown("---")
+
+        # ── Working Days + Holidays ──
+        with st.form("branch_schedule"):
+            st.markdown("**📅 Working Days & Holidays**")
+            st.caption("Set which days the branch operates. Online reservations are blocked on non-working days and holidays.")
+
+            all_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            current_wd = [d.strip() for d in (branch.get("working_days", "Mon,Tue,Wed,Thu,Fri") or "Mon,Tue,Wed,Thu,Fri").split(",") if d.strip()]
+
+            wd_cols = st.columns(7)
+            selected_days = []
+            for idx_d, day in enumerate(all_days):
+                with wd_cols[idx_d]:
+                    if st.checkbox(day, value=(day in current_wd), key=f"wd_{day}"):
+                        selected_days.append(day)
+
+            st.markdown("**Holidays** (blocked dates)")
+            st.caption("Enter holiday dates, one per line (YYYY-MM-DD). Members cannot make online reservations on these dates.")
+            current_hol = branch.get("holidays", "") or ""
+            # Convert comma-separated to newline for display
+            hol_display = current_hol.replace(",", "\n").strip()
+            holidays_input = st.text_area("Holiday Dates", value=hol_display,
+                                          placeholder="2026-01-01\n2026-04-09\n2026-06-12",
+                                          height=120)
+
+            if st.form_submit_button("💾 Save Schedule", type="primary"):
+                wd_str = ",".join(selected_days) if selected_days else "Mon,Tue,Wed,Thu,Fri"
+                # Parse holidays: accept newlines or commas
+                hol_lines = [h.strip() for h in holidays_input.replace("\n", ",").split(",") if h.strip()]
+                import re as re_mod
+                valid_hol = []
+                bad_hol = []
+                for h in hol_lines:
+                    if re_mod.match(r'^\d{4}-\d{2}-\d{2}$', h):
+                        valid_hol.append(h)
+                    else:
+                        bad_hol.append(h)
+                if bad_hol:
+                    st.error(f"Invalid date format: {', '.join(bad_hol)}. Use YYYY-MM-DD.")
+                else:
+                    hol_str = ",".join(sorted(set(valid_hol)))
+                    update_branch(working_days=wd_str, holidays=hol_str)
+                    st.success(f"✅ Schedule saved! Working: {wd_str} · Holidays: {len(valid_hol)}")
+                    st.rerun()
+
+        st.markdown("---")
+
+        # ── Test Mode ──
+        st.markdown("**🧪 Test / Mock Mode**")
+        st.caption("When ON, bypasses reservation time + day restrictions. Use for testing outside operating hours.")
+        test_on = branch.get("test_mode", False)
+        test_label = "🧪 **TEST MODE: ON** — All time/day restrictions bypassed" if test_on else "Test mode is OFF"
+        st.markdown(test_label)
+
+        if test_on:
+            if st.button("⏹️ Turn OFF Test Mode", type="secondary", use_container_width=True):
+                update_branch(test_mode=False)
+                st.success("✅ Test mode disabled. Normal schedule active.")
+                st.rerun()
+        else:
+            if st.button("🧪 Turn ON Test Mode", type="primary", use_container_width=True):
+                update_branch(test_mode=True)
+                st.success("✅ Test mode enabled! Reservations open regardless of time/day.")
+                st.rerun()
 
 # ═══════════════════════════════════════════════════
 #  DASHBOARD TAB
