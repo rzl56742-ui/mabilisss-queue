@@ -9,12 +9,11 @@ import streamlit as st
 from datetime import datetime
 from db import (
     VER, SSS_LOGO, PHT, now_pht, today_pht, today_iso, today_mmdd,
-    get_branch, get_categories_with_services, get_queue_today,
+    get_branch, get_categories_with_services, get_services, get_queue_today,
     insert_queue_entry, get_bqms_state, slot_counts, next_slot_num,
     is_duplicate, count_ahead, cancel_entry, expire_old_reserved,
     validate_mobile_ph, gen_id, extract_bqms_num,
     count_arrived_in_category, count_reserved_position, calc_est_wait,
-    get_services,
     is_reservation_open, format_time_12h, get_logo,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED
 )
@@ -93,7 +92,7 @@ def load_bqms_data():
         bqms = get_bqms_state()
 
 # Screens that need full data
-if screen in ("home", "select_cat", "select_svc", "member_form"):
+if screen in ("home", "select_cat", "select_lane", "select_svc", "member_form"):
     load_queue_data()
 if screen == "tracker":
     load_queue_data()
@@ -176,7 +175,7 @@ if screen == "home":
 
     c1, c2 = st.columns(2)
 
-    # Reservation time gate
+    # V2.3.0-P2: Reservation time gate
     res_open, res_msg = is_reservation_open(branch)
     can_reserve = is_open and res_open
 
@@ -184,6 +183,7 @@ if screen == "home":
         if st.button("📋 Reserve a Slot", use_container_width=True, type="primary", disabled=not can_reserve):
             st.session_state.sel_cat = None
             st.session_state.sel_svc = None
+            st.session_state["sel_lane"] = "regular"
             go("select_cat")
     with c2:
         if st.button("🔍 Track My Queue", use_container_width=True):
@@ -214,23 +214,30 @@ if screen == "home":
     </div>""", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════
-#  SELECT CATEGORY — V2.3.0-P3: Flat category list
+#  SELECT CATEGORY — V2.3.0-P3: Flat list (no groups)
 # ═══════════════════════════════════════════════════
 elif screen == "select_cat":
     if st.button("← Back to Home"):
         go("home")
     st.subheader("Step 1: Choose Transaction")
 
+    any_available = False
     for cat in cats:
         s = sc.get(cat["id"], {"remaining": cat.get("cap", 50), "cap": cat.get("cap", 50)})
         full = s["remaining"] <= 0
+        if not full:
+            any_available = True
 
         c1, c2 = st.columns([5, 1])
         with c1:
             btn_label = f"{cat['icon']} {cat['label']}"
             if st.button(btn_label, key=f"cat_{cat['id']}", disabled=full, use_container_width=True):
                 st.session_state.sel_cat = cat["id"]
-                go("select_svc")
+                # Decision #5: skip lane screen if priority_lane_enabled = false
+                if cat.get("priority_lane_enabled"):
+                    go("select_lane")
+                else:
+                    go("select_svc")
         with c2:
             if full:
                 st.markdown('<div style="text-align:center;"><span style="font-size:12px;font-weight:900;color:#ef4444;">FULL</span></div>', unsafe_allow_html=True)
@@ -240,11 +247,7 @@ elif screen == "select_cat":
         if cat.get("description"):
             st.caption(f"ℹ️ {cat['description']}")
 
-    all_full = all(
-        sc.get(c["id"], {}).get("remaining", 0) <= 0
-        for c in cats
-    )
-    if all_full:
+    if not any_available:
         open_t = format_time_12h(branch.get("reservation_open_time", "06:00") or "06:00")
         st.markdown(f"""<div class="sss-alert sss-alert-red" style="font-size:14px;">
             <strong>⚠️ All slots for today are full.</strong><br/>
@@ -253,7 +256,75 @@ elif screen == "select_cat":
         </div>""", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════
-#  SELECT SERVICE — V2.3.0-P3: Direct category → services
+#  SELECT LANE — V2.3.0-P3: Regular vs Priority (Decision #1)
+#  Only shown when category.priority_lane_enabled = true
+# ═══════════════════════════════════════════════════
+elif screen == "select_lane":
+    sel_cat_id = st.session_state.sel_cat
+    if not sel_cat_id:
+        go("select_cat")
+    else:
+        cat = next((c for c in cats if c["id"] == sel_cat_id), None)
+        if not cat or not cat.get("priority_lane_enabled"):
+            # Shouldn't be here — skip to service
+            go("select_svc")
+        else:
+            if st.button("← Back"):
+                go("select_cat")
+
+            st.subheader(f"Step 2: {cat['icon']} {cat.get('short_label', cat['label'])}")
+            st.markdown("**Choose your lane:**")
+
+            # Fresh slot counts for lane-specific display
+            fresh_q = get_queue_today()
+            fsc = slot_counts(cats, fresh_q)
+            cat_sc = fsc.get(cat["id"], {})
+
+            # --- Regular Lane ---
+            reg_info = cat_sc.get("regular", {})
+            reg_rem = reg_info.get("remaining", cat.get("cap", 50))
+            reg_full = reg_rem <= 0
+
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                if st.button("👤 Regular Lane", key="lane_regular", disabled=reg_full, use_container_width=True):
+                    st.session_state["sel_lane"] = "regular"
+                    go("select_svc")
+            with c2:
+                if reg_full:
+                    st.markdown('<div style="text-align:center;"><span style="font-size:12px;font-weight:900;color:#ef4444;">FULL</span></div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<div style='text-align:center;'><span style='font-size:20px;font-weight:900;color:#3399CC;'>{reg_rem}</span><br/><span style='font-size:10px;opacity:.5;'>left</span></div>", unsafe_allow_html=True)
+            st.caption("ℹ️ General members — standard queue order")
+
+            # --- Priority Lane ---
+            pri_info = cat_sc.get("priority", {})
+            pri_rem = pri_info.get("remaining", cat.get("priority_cap", 10))
+            pri_full = pri_rem <= 0
+
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                if st.button("⭐ Priority Lane (Senior / PWD / Pregnant)", key="lane_priority", disabled=pri_full, use_container_width=True):
+                    st.session_state["sel_lane"] = "priority"
+                    go("select_svc")
+            with c2:
+                if pri_full:
+                    st.markdown('<div style="text-align:center;"><span style="font-size:12px;font-weight:900;color:#ef4444;">FULL</span></div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<div style='text-align:center;'><span style='font-size:20px;font-weight:900;color:#f59e0b;'>{pri_rem}</span><br/><span style='font-size:10px;opacity:.5;'>left</span></div>", unsafe_allow_html=True)
+            st.caption("ℹ️ Senior Citizens (60+) · PWD · Pregnant Women — priority queue")
+
+            # RA 11199 verification warning
+            st.markdown("""<div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);
+                border-radius:8px;padding:10px 14px;margin-top:8px;font-size:12px;">
+                ⚠️ <b>Priority Lane Notice (RA 11199 / RA 9994 / RA 10754 / RA 10028)</b><br/><br/>
+                Priority Lane is reserved for qualified persons under Philippine law.
+                You will be asked to present <b>valid proof at the counter</b>.
+                Misrepresentation may result in <b>denial of service</b> and potential legal consequences.
+            </div>""", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════
+#  SELECT SERVICE — V2.3.0-P3: Clean lookup (no courtesy)
 # ═══════════════════════════════════════════════════
 elif screen == "select_svc":
     sel_cat_id = st.session_state.sel_cat
@@ -266,8 +337,11 @@ elif screen == "select_svc":
             if st.button("← Back"):
                 go("select_cat")
         else:
+            # Decision #5: back goes to lane selection only if priority_lane_enabled
+            has_lane_step = cat.get("priority_lane_enabled", False)
+            back_screen = "select_lane" if has_lane_step else "select_cat"
             if st.button("← Back"):
-                go("select_cat")
+                go(back_screen)
 
             # Re-check cap with fresh data
             fresh_q = get_queue_today()
@@ -282,14 +356,24 @@ elif screen == "select_svc":
                     Please try again on the next working day starting at {open_t}.
                 </div>""", unsafe_allow_html=True)
             else:
-                st.subheader("Step 2: Choose Service")
-                st.markdown(f"**{cat['icon']} {cat.get('short_label', cat['label'])}**")
+                step_num = "Step 3" if has_lane_step else "Step 2"
+                # Show lane badge if priority lane was selected
+                sel_lane = st.session_state.get("sel_lane", "regular")
+                lane_badge = ""
+                if has_lane_step and sel_lane == "priority":
+                    lane_badge = " · ⭐ Priority Lane"
+                elif has_lane_step:
+                    lane_badge = " · 👤 Regular Lane"
+
+                st.subheader(f"{step_num}: Choose Service")
+                st.markdown(f"**{cat['icon']} {cat.get('short_label', cat['label'])}{lane_badge}**")
                 st.caption(f"Slots remaining: {s['remaining']} of {s['cap']}")
 
                 if cat.get("description"):
                     st.caption(f"ℹ️ {cat['description']}")
 
-                svcs_list = [sv for sv in get_services() if sv.get("category_id") == cat["id"]]
+                # Direct service lookup
+                svcs_list = [s for s in get_services() if s.get("category_id") == cat["id"]]
                 if not svcs_list:
                     st.info("No specific services configured. Please contact branch staff.")
                 for svc in svcs_list:
@@ -302,7 +386,7 @@ elif screen == "select_svc":
                         st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;ℹ️ {svc_desc}")
 
 # ═══════════════════════════════════════════════════
-#  MEMBER FORM — V2.3.0-P3
+#  MEMBER FORM — V2.3.0-P3: Clean priority from lane selection
 # ═══════════════════════════════════════════════════
 elif screen == "member_form":
     sel_cat_id = st.session_state.sel_cat
@@ -311,7 +395,7 @@ elif screen == "member_form":
         go("select_cat")
     else:
         cat = next((c for c in cats if c["id"] == sel_cat_id), None)
-        svcs_list = [sv for sv in get_services() if sv.get("category_id") == sel_cat_id] if cat else []
+        svcs_list = [s for s in get_services() if s.get("category_id") == cat["id"]] if cat else []
         svc = next((s for s in svcs_list if s["id"] == sel_svc_id), None)
         if not cat or not svc:
             st.error("Selection not found. Please start over.")
@@ -321,8 +405,19 @@ elif screen == "member_form":
             if st.button("← Back"):
                 go("select_svc")
 
-            st.subheader("Step 3: Your Details")
-            st.markdown(f'<div class="sss-card">{cat["icon"]} <strong>{svc["label"]}</strong><br/><span style="opacity:.6;">{cat["label"]}</span></div>', unsafe_allow_html=True)
+            has_lane_step = cat.get("priority_lane_enabled", False)
+            step_num = "Step 4" if has_lane_step else "Step 3"
+            st.subheader(f"{step_num}: Your Details")
+
+            # P3: lane determined by lane selection screen (Decision #1)
+            sel_lane = st.session_state.get("sel_lane", "regular") if has_lane_step else "regular"
+            lane_badge = ""
+            if has_lane_step and sel_lane == "priority":
+                lane_badge = " · ⭐ Priority Lane"
+            elif has_lane_step:
+                lane_badge = " · 👤 Regular Lane"
+
+            st.markdown(f'<div class="sss-card">{cat["icon"]} <strong>{svc["label"]}</strong><br/><span style="opacity:.6;">{cat["label"]}{lane_badge}</span></div>', unsafe_allow_html=True)
 
             with st.form("reserve_form"):
                 fc1, fc2 = st.columns(2)
@@ -336,28 +431,30 @@ elif screen == "member_form":
                 with fc2:
                     mobile = st.text_input("Mobile * (09XX XXX XXXX)", placeholder="09171234567")
 
-                # Priority lane — behavior depends on branch priority_lane_mode
-                pri_value = "regular"
+                # Priority lane values — pre-determined from lane selection screen
+                pri_value = sel_lane  # "regular" or "priority"
+                lane_value = sel_lane
                 pri_confirmed = True
 
-                plm = branch.get("priority_lane_mode", "integrated")
-                if plm == "integrated":
-                    pri = st.radio("Lane:", ["👤 Regular", "⭐ Priority (Senior/PWD/Pregnant)"], horizontal=True)
-                    if "Priority" in pri:
-                        pri_value = "priority"
-                        st.markdown("""<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
-                            border-radius:8px;padding:10px 14px;margin:6px 0;font-size:12px;">
-                            ⚠️ <b>Priority Lane — Verification Required</b><br/><br/>
-                            Reserved for: 👴 <b>Senior Citizens</b> (60+) · ♿ <b>PWD</b> · 🤰 <b>Pregnant Women</b><br/><br/>
-                            📋 You will be asked to present <b>valid proof at the counter</b>.<br/><br/>
-                            ❌ <b>If you cannot present valid proof, you will be moved to the Regular Lane.</b>
-                        </div>""", unsafe_allow_html=True)
-                        pri_confirmed = st.checkbox("✅ I qualify and will present proof at the counter.", key="pri_confirm_s")
-                else:
-                    st.caption("💡 Senior Citizens, PWD, and Pregnant Women: Please inform the guard at the branch for priority accommodation.")
+                # If priority lane selected, show verification + confirmation checkbox
+                if sel_lane == "priority":
+                    st.markdown("""<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
+                        border-radius:8px;padding:10px 14px;margin:6px 0;font-size:12px;">
+                        ⚠️ <b>Priority Lane — Verification Required (RA 11199 / RA 9994 / RA 10754 / RA 10028)</b><br/><br/>
+                        Reserved for: 👴 <b>Senior Citizens</b> (60+) · ♿ <b>PWD</b> · 🤰 <b>Pregnant Women</b><br/><br/>
+                        📋 You will be asked to present <b>valid proof at the counter</b>:<br/>
+                        &nbsp;&nbsp;• Senior Citizen ID or gov't ID showing date of birth<br/>
+                        &nbsp;&nbsp;• PWD ID<br/>
+                        &nbsp;&nbsp;• Medical certificate or visible evidence of pregnancy<br/><br/>
+                        ⚖️ <b>IMPORTANT:</b> Misrepresentation is a violation of Philippine law and may result in
+                        <b>denial of service, queue position reassignment</b>, and potential legal consequences.<br/><br/>
+                        ❌ <b>If you cannot present valid proof, you will be moved to the Regular Lane</b>
+                        and your queue position will be adjusted accordingly.
+                    </div>""", unsafe_allow_html=True)
+                    pri_confirmed = st.checkbox("✅ I qualify under the law and will present valid proof at the counter.", key="pri_confirm_p3")
 
                 st.markdown("**🔒 Data Privacy (RA 10173)**")
-                consent = st.checkbox("I consent to data collection for today's queue.")
+                consent = st.checkbox("I consent to data collection for today's queue only. My data will be automatically deleted after today's operations per RA 10173.")
 
                 if st.form_submit_button("📋 Reserve My Slot", type="primary", use_container_width=True):
                     lu = last_name.strip().upper()
@@ -380,14 +477,23 @@ elif screen == "member_form":
                         errors.append("Check privacy consent.")
 
                     if pri_value == "priority" and not pri_confirmed:
-                        errors.append("Please confirm you qualify for the Courtesy/Priority Lane.")
+                        errors.append("Please confirm you qualify for the Priority Lane.")
 
-                    # Fresh cap check
+                    # Fresh cap check — P3: lane-specific when priority_lane_enabled
                     fresh_q = get_queue_today()
                     fsc = slot_counts(cats, fresh_q)
-                    remaining = fsc.get(cat["id"], {}).get("remaining", 0)
+                    cat_sc = fsc.get(cat["id"], {})
+                    if cat.get("priority_lane_enabled") and lane_value in cat_sc:
+                        remaining = cat_sc[lane_value].get("remaining", 0)
+                        cap_display = cat_sc[lane_value].get("cap", 0)
+                        lane_label = "Priority" if lane_value == "priority" else "Regular"
+                    else:
+                        remaining = cat_sc.get("remaining", 0)
+                        cap_display = cat_sc.get("cap", 0)
+                        lane_label = ""
                     if remaining <= 0:
-                        errors.append(f"No slots left for {cat['label']} today (cap: {fsc.get(cat['id'],{}).get('cap',0)}). Try next working day.")
+                        lane_suffix = f" ({lane_label} lane)" if lane_label else ""
+                        errors.append(f"No slots left for {cat['label']}{lane_suffix} today (cap: {cap_display}). Try next working day.")
 
                     if mob_clean and is_duplicate(fresh_q, lu, fu, mob_clean):
                         errors.append("You already have an active reservation today.")
@@ -414,6 +520,7 @@ elif screen == "member_form":
                             "category_id": cat["id"],
                             "cat_icon": cat["icon"],
                             "priority": pri_value,
+                            "lane": lane_value,
                             "status": "RESERVED",
                             "bqms_number": None,
                             "source": "ONLINE",
@@ -438,6 +545,7 @@ elif screen == "ticket":
                  onerror="this.style.display='none'"/>
             <div style="font-size:11px;opacity:.5;letter-spacing:2px;">MABILISSS QUEUE — {branch.get('name','').upper()}</div>
             <div style="font-weight:700;margin:4px 0;">{t['category']} — {t['service']}</div>
+            {"<span style='display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(245,158,11,.15);color:#f59e0b;'>⭐ PRIORITY LANE</span>" if t.get("lane") == "priority" else ""}
             <hr style="border:1px dashed rgba(128,128,128,.2);"/>
             <div style="font-size:11px;opacity:.5;">RESERVATION NUMBER</div>
             <div class="sss-resnum">{t['res_num']}</div>
@@ -572,13 +680,24 @@ elif screen == "tracker":
 
             if not is_terminal:
                 cat_obj = next((c for c in cats if c["id"] == t.get("category_id")), None)
-                ns_val = fbq.get(t.get("category_id", ""), "")
+                # P3: bqms_state now returns dict with now_serving + now_serving_priority
+                bqms_info = fbq.get(t.get("category_id", ""), {})
+                if isinstance(bqms_info, str):
+                    bqms_info = {"now_serving": bqms_info, "now_serving_priority": ""}
+                entry_lane = t.get("lane", "regular")
+                # Show the now-serving for the member's own lane
+                if entry_lane == "priority" and cat_obj and cat_obj.get("priority_lane_enabled"):
+                    ns_val = bqms_info.get("now_serving_priority", "")
+                    ns_label = "Now Serving (Priority)"
+                else:
+                    ns_val = bqms_info.get("now_serving", "")
+                    ns_label = "Now Serving"
                 ahead = count_ahead(fresh, t)
 
                 m1, m2 = st.columns(2)
                 with m1:
                     ns_display = ns_val if ns_val else "—"
-                    st.markdown(f'<div class="sss-metric"><div class="val" style="color:#22B8CF;">{ns_display}</div><div class="lbl">Now Serving</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="sss-metric"><div class="val" style="color:#22B8CF;">{ns_display}</div><div class="lbl">{ns_label}</div></div>', unsafe_allow_html=True)
                 with m2:
                     st.markdown(f'<div class="sss-metric"><div class="val">{t["bqms_number"]}</div><div class="lbl">Your Number</div></div>', unsafe_allow_html=True)
 
@@ -619,7 +738,13 @@ elif screen == "tracker":
                 st.markdown(f'<div class="sss-card" style="text-align:center;"><div style="font-size:11px;opacity:.5;">RESERVATION NUMBER</div><div class="sss-resnum">{t["res_num"]}</div></div>', unsafe_allow_html=True)
 
                 cat_id = t.get("category_id", "")
-                at_branch = count_arrived_in_category(fresh, cat_id)
+                cat_obj_pre = next((c for c in cats if c["id"] == cat_id), None)
+                entry_lane_pre = t.get("lane", "regular")
+                # P3: lane-specific counts when priority_lane_enabled
+                if cat_obj_pre and cat_obj_pre.get("priority_lane_enabled"):
+                    at_branch = count_arrived_in_category(fresh, cat_id, lane=entry_lane_pre)
+                else:
+                    at_branch = count_arrived_in_category(fresh, cat_id)
                 my_pos = count_reserved_position(fresh, t)
                 is_arrived = t.get("status") == "ARRIVED"
                 batch_time = branch.get("batch_assign_time", "08:00")
@@ -663,7 +788,7 @@ elif screen == "tracker":
             st.markdown(f"""<div class="sss-card" style="border-left:4px solid #ef4444;">
                 <strong>Need to cancel?</strong><br/>
                 <span style="font-size:13px;opacity:.7;">
-                Your slot will be released for other members. You may reserve again.</span>
+                Your slot will be released for other members. You may reserve again tomorrow.</span>
             </div>""", unsafe_allow_html=True)
 
             # Use session state for confirmation to avoid accidental cancels

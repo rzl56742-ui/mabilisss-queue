@@ -28,6 +28,9 @@ from db import (
     batch_assign_category, batch_assign_all, quick_checkin,
     get_batch_log_today,
     swap_category_order, swap_service_order,
+
+    reset_all_now_serving, check_daily_reset_needed, mark_daily_reset_done,
+    validate_priority_config,
     is_reservation_open, format_time_12h, get_logo, ICON_LIBRARY,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED,
     ROLES, ROLE_LABELS, ROLE_ICONS
@@ -141,6 +144,13 @@ bqms_state = get_bqms_state()
 o_stat = branch.get("o_stat", "online")
 sc = slot_counts(cats, queue)
 
+# ── Decision #3: Daily auto-reset Now-Serving on first staff login ──
+if check_daily_reset_needed(branch):
+    reset_all_now_serving()
+    mark_daily_reset_done()
+    invalidate_branch()
+    branch = get_branch()  # Refresh after reset
+
 # ═══════════════════════════════════════════════════
 #  HEADER + NAV
 # ═══════════════════════════════════════════════════
@@ -242,11 +252,22 @@ elif tab == "queue":
         st.markdown(f'<div class="sss-alert sss-alert-red" style="font-size:16px;">🔴 <strong>{len(unassigned)} NEED BQMS#</strong></div>', unsafe_allow_html=True)
 
     # Now Serving per category — inline, always visible
+    # P3: Show both regular and priority now-serving when priority_lane_enabled
     ns_parts = []
     for c in cats:
-        ns_val = bqms_state.get(c["id"], "")
-        disp = ns_val if ns_val else "—"
-        ns_parts.append(f"{c['icon']} {c.get('short_label', c['label'][:8])}: <span class='sss-ns-badge'>{disp}</span>")
+        bs = bqms_state.get(c["id"], {})
+        if isinstance(bs, str):
+            bs = {"now_serving": bs, "now_serving_priority": ""}
+        ns_reg = bs.get("now_serving", "") or "—"
+        if c.get("priority_lane_enabled"):
+            ns_pri = bs.get("now_serving_priority", "") or "—"
+            ns_parts.append(
+                f"{c['icon']} {c.get('short_label', c['label'][:8])}: "
+                f"<span class='sss-ns-badge'>👤{ns_reg}</span> "
+                f"<span class='sss-ns-badge' style='background:rgba(245,158,11,.15);color:#f59e0b;'>⭐{ns_pri}</span>"
+            )
+        else:
+            ns_parts.append(f"{c['icon']} {c.get('short_label', c['label'][:8])}: <span class='sss-ns-badge'>{ns_reg}</span>")
     if ns_parts:
         st.markdown(f"""<div class="sss-card" style="padding:10px 14px;">
             <div style="font-size:11px;opacity:.5;margin-bottom:6px;">📺 NOW SERVING</div>
@@ -255,6 +276,7 @@ elif tab == "queue":
             </div></div>""", unsafe_allow_html=True)
 
     # Manual override for Now Serving (edge cases — e.g., walk-ins not in digital queue)
+    # P3: Separate override for regular and priority lanes
     if can_edit_queue and role != "kiosk":
         with st.expander("✏️ Manual Override — Now Serving"):
             st.caption("Use this only for walk-ins served outside the digital queue.")
@@ -263,16 +285,32 @@ elif tab == "queue":
                                         key="ns_override_cat")
             override_idx = [f"{c['icon']} {c['label']}" for c in cats].index(override_cat)
             override_c = cats[override_idx]
-            cur_ns = bqms_state.get(override_c["id"], "")
+            bs_ov = bqms_state.get(override_c["id"], {})
+            if isinstance(bs_ov, str):
+                bs_ov = {"now_serving": bs_ov, "now_serving_priority": ""}
 
+            # Regular lane override (always shown)
+            cur_ns = bs_ov.get("now_serving", "")
             oc1, oc2 = st.columns([3, 1])
             with oc1:
-                ns_new = st.text_input("BQMS #", value=cur_ns, key="ns_override_val")
+                ns_new = st.text_input("BQMS # (Regular)", value=cur_ns, key="ns_override_val")
             with oc2:
                 st.markdown("<div style='margin-top:6px;'></div>", unsafe_allow_html=True)
                 if st.button("Update", key="ns_override_btn", use_container_width=True):
-                    update_bqms_state(override_c["id"], ns_new.strip().upper())
+                    update_bqms_state(override_c["id"], ns_new.strip().upper(), lane="regular")
                     st.rerun()
+
+            # P3: Priority lane override (only when enabled)
+            if override_c.get("priority_lane_enabled"):
+                cur_ns_pri = bs_ov.get("now_serving_priority", "")
+                pc1, pc2 = st.columns([3, 1])
+                with pc1:
+                    ns_new_pri = st.text_input("BQMS # (Priority ⭐)", value=cur_ns_pri, key="ns_override_val_pri")
+                with pc2:
+                    st.markdown("<div style='margin-top:6px;'></div>", unsafe_allow_html=True)
+                    if st.button("Update", key="ns_override_btn_pri", use_container_width=True):
+                        update_bqms_state(override_c["id"], ns_new_pri.strip().upper(), lane="priority")
+                        st.rerun()
 
     # ═══════════════════════════════════════════════════
     #  V2.3.0 — QUICK CHECK-IN (Guard + Staff)
@@ -472,6 +510,7 @@ elif tab == "queue":
 
                 w_svc = None
                 if w_cat:
+                    # Service lookup — direct filtering
                     svcs_for_cat = [s for s in get_services() if s.get("category_id") == w_cat["id"]]
                     svc_labels = ["-- None --"] + [
                         f"{s['label']}" + (f" — {s['description']}" if s.get("description") else "")
@@ -490,14 +529,30 @@ elif tab == "queue":
                     wmi = st.text_input("M.I.", max_chars=2, key="wmi")
                 with wc2:
                     wmob = st.text_input("Mobile (optional)", key="wmob")
-                wpri = st.radio("Lane:", ["👤 Regular", "⭐ Priority (Senior/PWD/Pregnant)"], horizontal=True, key="wpri")
-                st.caption("⭐ Priority = Senior Citizen, PWD, or Pregnant. Ask for valid ID/proof before selecting.")
+
+                # Decision #5: Only show priority radio when category has priority_lane_enabled
+                wi_lane = "regular"
+                if w_cat and w_cat.get("priority_lane_enabled"):
+                    wpri = st.radio("Lane:", ["👤 Regular", "⭐ Priority (Senior/PWD/Pregnant)"], horizontal=True, key="wpri")
+                    st.caption("⭐ Priority = Senior Citizen, PWD, or Pregnant. Verify valid ID/proof before selecting.")
+                    if "Priority" in wpri:
+                        wi_lane = "priority"
 
                 wbqms = ""
                 if role != "kiosk" and w_cat:
-                    suggested = suggest_next_bqms(queue, w_cat) if w_cat else ""
-                    rs = w_cat.get("bqms_range_start")
-                    re_ = w_cat.get("bqms_range_end")
+                    # P3: lane-aware BQMS suggestion
+                    if w_cat.get("priority_lane_enabled"):
+                        suggested = suggest_next_bqms(queue, w_cat, lane=wi_lane)
+                        if wi_lane == "priority":
+                            rs = w_cat.get("priority_bqms_start")
+                            re_ = w_cat.get("priority_bqms_end")
+                        else:
+                            rs = w_cat.get("bqms_range_start")
+                            re_ = w_cat.get("bqms_range_end")
+                    else:
+                        suggested = suggest_next_bqms(queue, w_cat) if w_cat else ""
+                        rs = w_cat.get("bqms_range_start")
+                        re_ = w_cat.get("bqms_range_end")
                     hint = f"Series: {rs}–{re_}" if rs and re_ else "Enter BQMS #"
                     wbqms = st.text_input(f"BQMS # ({hint})",
                                           value=suggested,
@@ -523,18 +578,26 @@ elif tab == "queue":
                         fresh_q = get_queue_today()
                         fsc = slot_counts(cats, fresh_q)
                         bv_check = wbqms.strip().upper() if wbqms else ""
+                        wi_lane_val = wi_lane  # Already set from radio or defaults to "regular"
 
                         if is_duplicate(fresh_q, wlu, wfu, wmu_clean):
                             errs.append("Duplicate entry for this person today.")
-                        if fsc.get(w_cat["id"], {}).get("remaining", 0) <= 0:
+                        # P3: lane-specific cap check
+                        cat_sc = fsc.get(w_cat["id"], {})
+                        if w_cat.get("priority_lane_enabled") and wi_lane_val in cat_sc:
+                            lane_rem = cat_sc[wi_lane_val].get("remaining", 0)
+                            if lane_rem <= 0:
+                                lane_lbl = "Priority" if wi_lane_val == "priority" else "Regular"
+                                errs.append(f"Daily cap reached for {w_cat['label']} ({lane_lbl} lane).")
+                        elif cat_sc.get("remaining", 0) <= 0:
                             errs.append(f"Daily cap reached for {w_cat['label']}.")
                         if bv_check:
                             if is_bqms_taken(fresh_q, bv_check):
                                 errs.append(f"BQMS {bv_check} already assigned!")
-                            ok, msg = validate_bqms_range(bv_check, w_cat)
+                            ok, msg = validate_bqms_range(bv_check, w_cat, lane=wi_lane_val)
                             if not ok:
                                 errs.append(f"BQMS range warning: {msg}")
-                            conflict = find_bqms_conflict_category(bv_check, cats, w_cat["id"])
+                            conflict = find_bqms_conflict_category(bv_check, cats, w_cat["id"], current_lane=wi_lane_val)
                             if conflict:
                                 errs.append(f"⚠️ {bv_check} falls in {conflict['label']} series. Assign anyway via override.")
 
@@ -556,7 +619,8 @@ elif tab == "queue":
                             "service": svc_lbl, "service_id": svc_id,
                             "category": w_cat["label"], "category_id": w_cat["id"],
                             "cat_icon": w_cat["icon"],
-                            "priority": "priority" if "Priority" in wpri else "regular",
+                            "priority": wi_lane_val,
+                            "lane": wi_lane_val,
                             "status": "ARRIVED" if bv_check else "RESERVED",
                             "bqms_number": bv_check or None,
                             "source": "KIOSK",
@@ -623,13 +687,23 @@ elif tab == "queue":
             bdr = "#ef4444" if needs_b else "rgba(128,128,128,.15)"
             src = "🏢" if r.get("source") == "KIOSK" else "📱"
             pri = "⭐" if r.get("priority") == "priority" else ""
+            # P3: Lane badge for categories with priority_lane_enabled
+            lane_badge = ""
+            r_cat_obj = next((c for c in cats if c["id"] == r.get("category_id")), None)
+            if r_cat_obj and r_cat_obj.get("priority_lane_enabled"):
+                r_lane = r.get("lane", "regular")
+                if r_lane == "priority":
+                    lane_badge = '<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(245,158,11,.15);color:#f59e0b;margin-left:4px;">⭐PRI</span>'
+                else:
+                    lane_badge = '<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(34,197,94,.1);color:#22c55e;margin-left:4px;">👤REG</span>'
             bqms_h = ""
             if r.get("bqms_number"):
-                # Range check indicator
-                cat_obj = next((c for c in cats if c["id"] == r.get("category_id")), None)
+                # Range check indicator — P3: lane-aware
+                cat_obj_rc = next((c for c in cats if c["id"] == r.get("category_id")), None)
                 range_ok = True
-                if cat_obj:
-                    ok, _ = validate_bqms_range(r["bqms_number"], cat_obj)
+                if cat_obj_rc:
+                    r_lane_rc = r.get("lane", "regular")
+                    ok, _ = validate_bqms_range(r["bqms_number"], cat_obj_rc, lane=r_lane_rc)
                     range_ok = ok
                 range_icon = "✓" if range_ok else "⚠️"
                 bqms_h = f'<div style="font-family:monospace;font-size:20px;font-weight:900;color:#22B8CF;margin-top:4px;">BQMS: {r["bqms_number"]} <span style="font-size:12px;">{range_icon}</span></div>'
@@ -640,16 +714,19 @@ elif tab == "queue":
                 void_note = f'<br/><span style="font-size:11px;color:#f59e0b;">Void: {r["void_reason"]}</span>'
 
             st.markdown(f"""<div class="sss-card" style="border-left:4px solid {bdr};">
-                <span style="display:inline-block;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;
-                    background:rgba(51,153,204,.15);color:#3399CC;float:right;">
-                    {STATUS_LABELS.get(status, status)}</span>
-                <span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{r.get('res_num','')}</span>
-                <span style="font-size:11px;opacity:.5;margin-left:6px;">{src}</span>{pri}<br/>
-                <strong>{r.get('cat_icon','')} {r['last_name']}, {r['first_name']} {r.get('mi','')}</strong><br/>
-                <span style="font-size:12px;opacity:.6;">{r.get('category','')} → {r.get('service','')}</span>
-                {f'<br/><span style="font-size:11px;opacity:.5;">📱 {r["mobile"]}</span>' if r.get('mobile') else ''}{void_note}
-                {bqms_h}
-            </div>""", unsafe_allow_html=True)
+                <div style="display:flex;justify-content:space-between;">
+                    <div><span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{r.get('res_num','')}</span>
+                        <span style="font-size:11px;opacity:.5;margin-left:6px;">{src}</span>{pri}{lane_badge}<br/>
+                        <strong>{r.get('cat_icon','')} {r['last_name']}, {r['first_name']} {r.get('mi','')}</strong><br/>
+                        <span style="font-size:12px;opacity:.6;">{r.get('category','')} → {r.get('service','')}</span>
+                        {f'<br/><span style="font-size:11px;opacity:.5;">📱 {r["mobile"]}</span>' if r.get('mobile') else ''}{void_note}
+                    </div>
+                    <div style="text-align:right;">
+                        <span style="display:inline-block;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;
+                            background:rgba(51,153,204,.15);color:#3399CC;">
+                            {STATUS_LABELS.get(status, status)}</span>{bqms_h}
+                    </div>
+                </div></div>""", unsafe_allow_html=True)
 
             # ── ACTION BUTTONS (only for queue operators) ──
             if can_edit_queue:
@@ -658,15 +735,27 @@ elif tab == "queue":
 
                 # ── NEEDS BQMS ASSIGNMENT ──
                 if needs_b:
-                    suggested = suggest_next_bqms(queue, cat_obj) if cat_obj else ""
-                    rs = cat_obj.get("bqms_range_start") if cat_obj else None
-                    re_ = cat_obj.get("bqms_range_end") if cat_obj else None
+                    # P3: lane-aware BQMS suggestion and range
+                    entry_lane = r.get("lane", "regular")
+                    if cat_obj and cat_obj.get("priority_lane_enabled"):
+                        suggested = suggest_next_bqms(queue, cat_obj, lane=entry_lane)
+                        if entry_lane == "priority":
+                            rs = cat_obj.get("priority_bqms_start")
+                            re_ = cat_obj.get("priority_bqms_end")
+                        else:
+                            rs = cat_obj.get("bqms_range_start")
+                            re_ = cat_obj.get("bqms_range_end")
+                    else:
+                        suggested = suggest_next_bqms(queue, cat_obj) if cat_obj else ""
+                        rs = cat_obj.get("bqms_range_start") if cat_obj else None
+                        re_ = cat_obj.get("bqms_range_end") if cat_obj else None
                     hint = f"Series: {rs}–{re_}" if rs and re_ else "e.g., 2005"
+                    lane_tag = f" [{entry_lane.upper()}]" if cat_obj and cat_obj.get("priority_lane_enabled") else ""
 
                     st.markdown(f"""<div style="background:rgba(220,53,69,.08);border:1px solid rgba(220,53,69,.25);
                         border-radius:8px;padding:10px 14px;margin-bottom:8px;">
                         <span style="font-size:12px;font-weight:700;color:#ef4444;">
-                        🎫 Assign BQMS for {r.get('res_num','')} — {hint}</span></div>""", unsafe_allow_html=True)
+                        🎫 Assign BQMS for {r.get('res_num','')}{lane_tag} — {hint}</span></div>""", unsafe_allow_html=True)
 
                     ac1, ac2 = st.columns([3, 1])
                     with ac1:
@@ -685,7 +774,7 @@ elif tab == "queue":
                                 if is_bqms_taken(fresh_q, bv_clean):
                                     assign_err = f"BQMS {bv_clean} is already assigned!"
                                 if cat_obj and not assign_err:
-                                    ok, msg = validate_bqms_range(bv_clean, cat_obj)
+                                    ok, msg = validate_bqms_range(bv_clean, cat_obj, lane=entry_lane)
                                     if not ok:
                                         assign_err = f"Range warning: {msg}"
                                 if assign_err:
@@ -815,20 +904,23 @@ elif tab == "queue":
 # ═══════════════════════════════════════════════════
 elif tab == "admin" and is_admin_role:
     st.subheader("👔 Admin Panel")
-    atabs = st.tabs(["📋 Categories", "🔧 Sub-Categories", "📊 Daily Caps",
+    atabs = st.tabs(["📋 Categories", "🔧 Sub-Categories",
                      "👥 Users", "🏢 Branch"])
 
-    # ══════════ CATEGORIES (Full CRUD + BQMS Series + Grouping) ══════════
+    # ══════════ CATEGORIES (Full CRUD + BQMS Series + Priority Lane) ══════════
     with atabs[0]:
         st.markdown("**Manage BQMS Categories**")
-        st.caption("Main transaction categories shown to members. Configure BQMS series, lane grouping, and descriptions.")
+        st.caption("Main transaction categories shown to members. Configure BQMS series, priority lane, and descriptions.")
 
         for i, cat in enumerate(cats):
             rs = cat.get("bqms_range_start", "")
             re_ = cat.get("bqms_range_end", "")
             pfx = cat.get("bqms_prefix", "")
             range_txt = f" · Series: {pfx}{rs}–{pfx}{re_}" if rs and re_ else " · No series set"
-            with st.expander(f"{cat['icon']} {cat['label']} — Cap: {cat['cap']}{range_txt}"):
+            # P3: Priority lane indicator
+            pri_lane_txt = " · ⭐PriLane" if cat.get("priority_lane_enabled") else ""
+
+            with st.expander(f"{cat['icon']} {cat['label']} — Cap: {cat['cap']}{range_txt}{pri_lane_txt}"):
                 # ── Reorder buttons (outside form) ──
                 mc1, mc2, mc3 = st.columns([1, 1, 6])
                 with mc1:
@@ -877,21 +969,75 @@ elif tab == "admin" and is_admin_role:
                     with bc3:
                         new_re = st.number_input("Range End", value=re_ if re_ else 0, min_value=0, key=f"cre_{cat['id']}")
 
+                    # ── V2.3.0-P3: Per-Category Priority Lane ──
+                    st.markdown("**⭐ Priority Lane (Per-Category)**")
+                    st.caption("Enable a priority sub-lane for Senior Citizens, PWD, and Pregnant Women (RA 11199).")
+                    new_pri_enabled = st.checkbox("Enable Priority Lane",
+                                                  value=bool(cat.get("priority_lane_enabled", False)),
+                                                  key=f"cpe_{cat['id']}")
+                    if new_pri_enabled:
+                        pc1, pc2, pc3 = st.columns(3)
+                        with pc1:
+                            new_pri_cap = st.number_input("Priority Cap",
+                                                          value=cat.get("priority_cap", 10) or 10,
+                                                          min_value=1, key=f"cpc_{cat['id']}",
+                                                          help="Maximum priority entries per day for this category")
+                        with pc2:
+                            cur_pri_rs = cat.get("priority_bqms_start") or 0
+                            new_pri_rs = st.number_input("Priority BQMS Start",
+                                                          value=cur_pri_rs, min_value=0,
+                                                          key=f"cprs_{cat['id']}")
+                        with pc3:
+                            cur_pri_re = cat.get("priority_bqms_end") or 0
+                            new_pri_re = st.number_input("Priority BQMS End",
+                                                          value=cur_pri_re, min_value=0,
+                                                          key=f"cpre_{cat['id']}")
+                        if new_pri_rs > 0 and new_pri_re > 0 and new_pri_rs >= new_pri_re:
+                            st.error("Priority Range Start must be less than Range End.")
+                        # Overlap check with regular range
+                        if new_pri_rs > 0 and new_pri_re > 0 and new_rs > 0 and new_re > 0:
+                            if not (new_pri_re < new_rs or new_pri_rs > new_re):
+                                st.warning("⚠️ Priority and Regular BQMS ranges overlap! This will cause conflicts.")
+
                     if st.form_submit_button("💾 Save Category", type="primary"):
-                        upd = {
-                            "label": new_label.strip(), "icon": new_icon.strip(),
-                            "short_label": new_short.strip(), "avg_time": new_avg,
-                            "sort_order": new_order, "description": new_desc.strip(),
-                            "bqms_prefix": new_pfx.strip(),
-                            "bqms_range_start": new_rs if new_rs > 0 else None,
-                            "bqms_range_end": new_re if new_re > 0 else None,
-                        }
-                        if new_rs > 0 and new_re > 0 and new_rs >= new_re:
-                            st.error("Range Start must be less than Range End.")
-                        else:
-                            update_category(cat["id"], **upd)
-                            st.success("✅ Category saved!")
-                            st.rerun()
+                        # Decision #4: Validate priority config before saving
+                        save_ok = True
+                        if new_pri_enabled:
+                            pri_start = new_pri_rs if new_pri_rs > 0 else 0
+                            pri_end = new_pri_re if new_pri_re > 0 else 0
+                            reg_start = new_rs if new_rs > 0 else 0
+                            reg_end = new_re if new_re > 0 else 0
+                            valid, err_msg = validate_priority_config(
+                                True, pri_start, pri_end, reg_start, reg_end)
+                            if not valid:
+                                st.error(f"❌ {err_msg}")
+                                save_ok = False
+
+                        if save_ok:
+                            upd = {
+                                "label": new_label.strip(), "icon": new_icon.strip(),
+                                "short_label": new_short.strip(), "avg_time": new_avg,
+                                "sort_order": new_order, "description": new_desc.strip(),
+                                "bqms_prefix": new_pfx.strip(),
+                                "bqms_range_start": new_rs if new_rs > 0 else None,
+                                "bqms_range_end": new_re if new_re > 0 else None,
+                                # V2.3.0-P3 priority lane fields
+                                "priority_lane_enabled": new_pri_enabled,
+                            }
+                            if new_pri_enabled:
+                                upd["priority_cap"] = new_pri_cap
+                                upd["priority_bqms_start"] = new_pri_rs if new_pri_rs > 0 else None
+                                upd["priority_bqms_end"] = new_pri_re if new_pri_re > 0 else None
+                            else:
+                                upd["priority_cap"] = 10
+                                upd["priority_bqms_start"] = None
+                                upd["priority_bqms_end"] = None
+                            if new_rs > 0 and new_re > 0 and new_rs >= new_re:
+                                st.error("Range Start must be less than Range End.")
+                            else:
+                                update_category(cat["id"], **upd)
+                                st.success("✅ Category saved!")
+                                st.rerun()
 
                 # Delete (outside form)
                 if has_active_entries(cat["id"]):
@@ -930,28 +1076,65 @@ elif tab == "admin" and is_admin_role:
             with nbc3:
                 nc_re = st.number_input("Range End", value=0, min_value=0, key="nc_re")
 
+            # V2.3.0-P3: Per-Category Priority Lane
+            st.markdown("**⭐ Priority Lane**")
+            st.caption("Enable a priority sub-lane for Senior Citizens, PWD, and Pregnant Women (RA 11199).")
+            nc_pri_enabled = st.checkbox("Enable Priority Lane", key="nc_pe")
+            nc_pri_cap = 10
+            nc_pri_rs = 0
+            nc_pri_re = 0
+            if nc_pri_enabled:
+                npc1, npc2, npc3 = st.columns(3)
+                with npc1:
+                    nc_pri_cap = st.number_input("Priority Cap", value=10, min_value=1, key="nc_pcap")
+                with npc2:
+                    nc_pri_rs = st.number_input("Priority BQMS Start", value=0, min_value=0, key="nc_prs")
+                with npc3:
+                    nc_pri_re = st.number_input("Priority BQMS End", value=0, min_value=0, key="nc_pre")
+
             if st.form_submit_button("➕ Add Category", type="primary"):
                 nid = nc_id.strip().lower().replace(" ", "_")
+                add_ok = True
                 if not nid or not nc_label.strip():
                     st.error("ID and Label required.")
+                    add_ok = False
                 elif any(c["id"] == nid for c in cats):
                     st.error(f"ID '{nid}' already exists.")
+                    add_ok = False
                 elif nc_rs > 0 and nc_re > 0 and nc_rs >= nc_re:
                     st.error("Range Start must be less than Range End.")
-                else:
+                    add_ok = False
+
+                # Decision #4: Validate priority config
+                if add_ok and nc_pri_enabled:
+                    valid, err_msg = validate_priority_config(
+                        True,
+                        nc_pri_rs if nc_pri_rs > 0 else 0,
+                        nc_pri_re if nc_pri_re > 0 else 0,
+                        nc_rs if nc_rs > 0 else 0,
+                        nc_re if nc_re > 0 else 0)
+                    if not valid:
+                        st.error(f"❌ {err_msg}")
+                        add_ok = False
+
+                if add_ok:
                     add_category(nid, nc_label.strip(), nc_icon.strip(),
                                  nc_short.strip(), nc_avg, nc_cap, nc_order,
                                  nc_pfx.strip(),
                                  nc_rs if nc_rs > 0 else None,
                                  nc_re if nc_re > 0 else None,
-                                 description=nc_desc.strip())
+                                 description=nc_desc.strip(),
+                                 priority_lane_enabled=nc_pri_enabled,
+                                 priority_cap=nc_pri_cap,
+                                 priority_bqms_start=nc_pri_rs if nc_pri_rs > 0 else None,
+                                 priority_bqms_end=nc_pri_re if nc_pri_re > 0 else None)
                     st.success(f"✅ Added {nc_label.strip()}!")
                     st.rerun()
 
     # ══════════ SUB-CATEGORIES ══════════
     with atabs[1]:
         st.markdown("**Manage Sub-Categories / Services**")
-        st.caption("Specific services under each category. Courtesy Lanes automatically inherit subcategories from their paired Regular Lane.")
+        st.caption("Specific services under each transaction category shown to members.")
 
         all_svcs = get_services()
         for cat in cats:
@@ -1016,35 +1199,8 @@ elif tab == "admin" and is_admin_role:
                             st.rerun()
             st.markdown("---")
 
-    # ══════════ DAILY CAPS ══════════
-    with atabs[2]:
-        st.markdown("**📊 Daily Caps — Slots per Category**")
-        st.caption("Set maximum members per category for the WHOLE DAY. Served = still counted. Only Cancel/Void frees a slot.")
-
-        for cat in cats:
-            s = sc.get(cat["id"], {"used": 0, "cap": 50, "remaining": 50})
-            st.markdown(f"**{cat['icon']} {cat['label']}** — Used: {s['used']} / Cap: {s['cap']} · Remaining: **{s['remaining']}**")
-
-            with st.form(f"cap_{cat['id']}"):
-                new_cap = st.number_input(
-                    f"Daily cap",
-                    value=s["cap"], min_value=1, max_value=999,
-                    key=f"capv_{cat['id']}")
-                if st.form_submit_button("💾 Save", use_container_width=True):
-                    if new_cap != s["cap"]:
-                        update_category(cat["id"], cap=new_cap)
-                        st.success(f"✅ {cat['label']} cap → {new_cap}")
-                        st.rerun()
-
-            pct = (s["used"] / s["cap"] * 100) if s["cap"] > 0 else 0
-            bar_color = "#22c55e" if pct < 70 else "#f59e0b" if pct < 90 else "#ef4444"
-            st.markdown(f"""<div style="margin-bottom:12px;">
-                <div style="background:rgba(128,128,128,.1);border-radius:4px;height:8px;overflow:hidden;">
-                    <div style="background:{bar_color};width:{min(pct,100):.0f}%;height:100%;border-radius:4px;"></div>
-                </div></div>""", unsafe_allow_html=True)
-
     # ══════════ USERS (Full CRUD) ══════════
-    with atabs[3]:
+    with atabs[2]:
         st.markdown("**👥 Staff Users Management**")
         st.caption("Add, edit, deactivate staff accounts, and reset passwords.")
 
@@ -1138,7 +1294,7 @@ elif tab == "admin" and is_admin_role:
                     st.rerun()
 
     # ══════════ BRANCH ══════════
-    with atabs[4]:
+    with atabs[3]:
         st.markdown("**🏢 Branch Configuration**")
 
         # ── Basic Info ──
@@ -1173,24 +1329,32 @@ elif tab == "admin" and is_admin_role:
             bt = st.text_input("Batch Assign Time (HH:MM, 24h)", value=bt_val,
                                help="When staff runs batch BQMS assignment. Default: 08:00")
 
-            # Priority lane mode
-            plm_opts = ["integrated", "separate"]
-            plm_val = branch.get("priority_lane_mode", "integrated")
-            plm_idx = plm_opts.index(plm_val) if plm_val in plm_opts else 0
-            plm = st.selectbox("Priority Lane Mode (for single-lane categories only)", plm_opts, index=plm_idx,
-                               format_func=lambda x: "Integrated — priority gets lower # in same queue (default)" if x == "integrated"
-                                   else "Separate — no priority radio shown",
-                               help="Integrated: members can self-select Priority via radio button → priority gets lower BQMS# in same series.\n\n"
-                                    "Separate: hides the priority radio.")
-
             if st.form_submit_button("💾 Save Queue Config", type="primary"):
                 import re as re_mod
                 if not re_mod.match(r'^\d{2}:\d{2}$', bt.strip()):
                     st.error("Batch time must be HH:MM format (e.g., 08:00, 08:15).")
                 else:
-                    update_branch(batch_assign_time=bt.strip(), priority_lane_mode=plm)
+                    update_branch(batch_assign_time=bt.strip())
                     st.success("✅ Queue config saved!")
                     st.rerun()
+
+        # ── Decision #3: Daily BQMS/Now-Serving Reset ──
+        st.markdown("---")
+        st.markdown("**🔄 Daily Now-Serving Reset**")
+        st.caption("Clears all Now Serving displays across all categories. Auto-runs on first staff login each day, or use the manual button below.")
+        last_reset = branch.get("last_reset_date", "Never")
+        reset_needed = check_daily_reset_needed(branch)
+        if reset_needed:
+            st.markdown('<div class="sss-alert sss-alert-yellow">⏳ Now-Serving reset <b>has not run yet today</b>. It will auto-clear on next queue action, or click below.</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="sss-alert sss-alert-green">✅ Now-Serving last reset: <b>{last_reset}</b></div>', unsafe_allow_html=True)
+
+        if st.button("🔄 Reset Now-Serving (All Categories)", type="secondary"):
+            count = reset_all_now_serving()
+            mark_daily_reset_done()
+            invalidate_branch()
+            st.success(f"✅ Cleared Now-Serving for {count} categories!")
+            st.rerun()
 
         st.markdown("---")
 
