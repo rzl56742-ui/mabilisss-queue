@@ -8,7 +8,11 @@
 """
 
 import streamlit as st
-from supabase import create_client
+try:
+    from supabase import create_client
+except ImportError as e:
+    st.error(f"❌ Supabase import failed: {e}")
+    st.stop()
 from datetime import date, datetime, timezone, timedelta
 import time, uuid, hashlib, re
 

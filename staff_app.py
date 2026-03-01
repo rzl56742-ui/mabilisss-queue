@@ -238,114 +238,101 @@ elif tab == "queue":
                     st.success("✅ Cleared!")
                     st.rerun()
 
-    # ── BQMS Alert + Now Serving Inline Badges ──
+    # ── NOW SERVING — Unified Display with Inline Controls ──
     if unassigned:
         st.markdown(f'<div class="sss-alert sss-alert-red" style="font-size:16px;">🔴 <strong>{len(unassigned)} NEED BQMS#</strong></div>', unsafe_allow_html=True)
 
-    # Now Serving per category — inline, always visible
-    # P3: Show both regular and priority now-serving when priority_lane_enabled
-    ns_parts = []
-    for c in cats:
+    # Unified Now Serving: badges + ◀/▶ for editors, read-only for kiosk
+    show_ns_controls = can_edit_queue and role != "kiosk"
+
+    st.markdown('<div style="font-size:11px;opacity:.5;margin-bottom:2px;">📺 NOW SERVING</div>', unsafe_allow_html=True)
+    for ci, c in enumerate(cats):
         bs = bqms_state.get(c["id"], {})
         if isinstance(bs, str):
             bs = {"now_serving": bs, "now_serving_priority": ""}
-        ns_reg = bs.get("now_serving", "") or "—"
-        if c.get("priority_lane_enabled"):
-            ns_pri = bs.get("now_serving_priority", "") or "—"
-            ns_parts.append(
-                f"{c['icon']} {c.get('short_label', c['label'][:8])}: "
-                f"<span class='sss-ns-badge'>👤{ns_reg}</span> "
-                f"<span class='sss-ns-badge' style='background:rgba(245,158,11,.15);color:#f59e0b;'>⭐{ns_pri}</span>"
-            )
+        cur_reg = bs.get("now_serving", "") or ""
+        disp_reg = cur_reg or "—"
+        has_pri = c.get("priority_lane_enabled")
+
+        if has_pri:
+            cur_pri = bs.get("now_serving_priority", "") or ""
+            disp_pri = cur_pri or "—"
+
+        short = c.get("short_label") or c["label"][:12]
+
+        if show_ns_controls:
+            # ── Editable row: label | ◀ badge ▶ | ◀ badge ▶ ──
+            if has_pri:
+                cols = st.columns([2.5, 0.35, 0.8, 0.35, 0.15, 0.35, 0.8, 0.35])
+            else:
+                cols = st.columns([2.5, 0.35, 0.8, 0.35])
+
+            with cols[0]:
+                st.markdown(f"<div style='padding-top:6px;font-size:13px;'>{c['icon']} <b>{short}</b></div>", unsafe_allow_html=True)
+            # Regular ◀
+            with cols[1]:
+                if st.button("◀", key=f"nr_{c['id']}", help="Previous"):
+                    try:
+                        v = max(int(cur_reg) - 1, 0)
+                        update_bqms_state(c["id"], str(v), lane="regular")
+                    except (ValueError, TypeError):
+                        update_bqms_state(c["id"], "", lane="regular")
+                    st.rerun()
+            # Regular badge
+            with cols[2]:
+                st.markdown(f"<div style='text-align:center;padding:4px 0;'><span class='sss-ns-badge'>👤 {disp_reg}</span></div>", unsafe_allow_html=True)
+            # Regular ▶
+            with cols[3]:
+                if st.button("▶", key=f"nf_{c['id']}", help="Next"):
+                    try:
+                        v = int(cur_reg) + 1
+                        update_bqms_state(c["id"], str(v), lane="regular")
+                    except (ValueError, TypeError):
+                        rs = c.get("bqms_range_start")
+                        update_bqms_state(c["id"], str(rs) if rs else "1", lane="regular")
+                    st.rerun()
+
+            if has_pri:
+                # Spacer
+                with cols[4]:
+                    st.write("")
+                # Priority ◀
+                with cols[5]:
+                    if st.button("◀", key=f"pr_{c['id']}", help="Previous"):
+                        try:
+                            v = max(int(cur_pri) - 1, 0)
+                            update_bqms_state(c["id"], str(v), lane="priority")
+                        except (ValueError, TypeError):
+                            update_bqms_state(c["id"], "", lane="priority")
+                        st.rerun()
+                # Priority badge
+                with cols[6]:
+                    st.markdown(f"<div style='text-align:center;padding:4px 0;'><span class='sss-ns-badge' style='background:rgba(245,158,11,.15);color:#f59e0b;'>⭐ {disp_pri}</span></div>", unsafe_allow_html=True)
+                # Priority ▶
+                with cols[7]:
+                    if st.button("▶", key=f"pf_{c['id']}", help="Next"):
+                        try:
+                            v = int(cur_pri) + 1
+                            update_bqms_state(c["id"], str(v), lane="priority")
+                        except (ValueError, TypeError):
+                            prs = c.get("priority_bqms_start")
+                            update_bqms_state(c["id"], str(prs) if prs else "1", lane="priority")
+                        st.rerun()
         else:
-            ns_parts.append(f"{c['icon']} {c.get('short_label', c['label'][:8])}: <span class='sss-ns-badge'>{ns_reg}</span>")
-    if ns_parts:
-        st.markdown(f"""<div class="sss-card" style="padding:10px 14px;">
-            <div style="font-size:11px;opacity:.5;margin-bottom:6px;">📺 NOW SERVING</div>
-            <div style="display:flex;flex-wrap:wrap;gap:10px;font-size:13px;">
-                {'&nbsp;&nbsp;'.join(ns_parts)}
-            </div></div>""", unsafe_allow_html=True)
-
-    # Merged Now Serving Controls — compact inline +/- per category/lane
-    if can_edit_queue and role != "kiosk":
-        with st.expander("📺 Now Serving — Advance / Override", expanded=False):
-            for ci, c in enumerate(cats):
-                bs_c = bqms_state.get(c["id"], {})
-                if isinstance(bs_c, str):
-                    bs_c = {"now_serving": bs_c, "now_serving_priority": ""}
-                cur_reg = bs_c.get("now_serving", "") or ""
-
-                st.markdown(f"**{c['icon']} {c['label']}**")
-
-                # Regular lane — always shown
-                rc1, rc2, rc3, rc4 = st.columns([0.5, 2, 0.5, 0.5])
-                with rc1:
-                    st.caption("👤")
-                with rc2:
-                    ns_reg_new = st.text_input("Regular BQMS", value=cur_reg,
-                                                key=f"nsc_r_{c['id']}",
-                                                label_visibility="collapsed",
-                                                placeholder="BQMS #")
-                with rc3:
-                    if st.button("◀", key=f"nsm_r_{c['id']}", help="Previous"):
-                        try:
-                            v = int(cur_reg) - 1
-                            update_bqms_state(c["id"], str(max(v, 0)), lane="regular")
-                        except (ValueError, TypeError):
-                            update_bqms_state(c["id"], "", lane="regular")
-                        st.rerun()
-                with rc4:
-                    if st.button("▶", key=f"nsp_r_{c['id']}", help="Next"):
-                        try:
-                            v = int(cur_reg) + 1
-                            update_bqms_state(c["id"], str(v), lane="regular")
-                        except (ValueError, TypeError):
-                            rs = c.get("bqms_range_start")
-                            update_bqms_state(c["id"], str(rs) if rs else "1", lane="regular")
-                        st.rerun()
-
-                # Check if text input was manually changed
-                if ns_reg_new.strip().upper() != cur_reg:
-                    if st.button(f"💾 Set Regular → {ns_reg_new.strip().upper()}", key=f"nss_r_{c['id']}", type="primary"):
-                        update_bqms_state(c["id"], ns_reg_new.strip().upper(), lane="regular")
-                        st.rerun()
-
-                # Priority lane — only when enabled
-                if c.get("priority_lane_enabled"):
-                    cur_pri = bs_c.get("now_serving_priority", "") or ""
-                    pc1, pc2, pc3, pc4 = st.columns([0.5, 2, 0.5, 0.5])
-                    with pc1:
-                        st.caption("⭐")
-                    with pc2:
-                        ns_pri_new = st.text_input("Priority BQMS", value=cur_pri,
-                                                    key=f"nsc_p_{c['id']}",
-                                                    label_visibility="collapsed",
-                                                    placeholder="Priority BQMS #")
-                    with pc3:
-                        if st.button("◀", key=f"nsm_p_{c['id']}", help="Previous"):
-                            try:
-                                v = int(cur_pri) - 1
-                                update_bqms_state(c["id"], str(max(v, 0)), lane="priority")
-                            except (ValueError, TypeError):
-                                update_bqms_state(c["id"], "", lane="priority")
-                            st.rerun()
-                    with pc4:
-                        if st.button("▶", key=f"nsp_p_{c['id']}", help="Next"):
-                            try:
-                                v = int(cur_pri) + 1
-                                update_bqms_state(c["id"], str(v), lane="priority")
-                            except (ValueError, TypeError):
-                                prs = c.get("priority_bqms_start")
-                                update_bqms_state(c["id"], str(prs) if prs else "1", lane="priority")
-                            st.rerun()
-
-                    if ns_pri_new.strip().upper() != cur_pri:
-                        if st.button(f"💾 Set Priority → {ns_pri_new.strip().upper()}", key=f"nss_p_{c['id']}", type="primary"):
-                            update_bqms_state(c["id"], ns_pri_new.strip().upper(), lane="priority")
-                            st.rerun()
-
-                if ci < len(cats) - 1:
-                    st.markdown("<hr style='margin:6px 0;opacity:.15;'>", unsafe_allow_html=True)
+            # ── Read-only row (kiosk) ──
+            if has_pri:
+                cur_pri = bs.get("now_serving_priority", "") or ""
+                disp_pri = cur_pri or "—"
+                st.markdown(
+                    f"<div style='font-size:13px;padding:2px 0;'>{c['icon']} <b>{short}</b>: "
+                    f"<span class='sss-ns-badge'>👤 {disp_reg}</span> "
+                    f"<span class='sss-ns-badge' style='background:rgba(245,158,11,.15);color:#f59e0b;'>⭐ {disp_pri}</span></div>",
+                    unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    f"<div style='font-size:13px;padding:2px 0;'>{c['icon']} <b>{short}</b>: "
+                    f"<span class='sss-ns-badge'>{disp_reg}</span></div>",
+                    unsafe_allow_html=True)
 
     # ═══════════════════════════════════════════════════
     #  V2.3.0 — QUICK CHECK-IN (Guard + Staff)
@@ -564,11 +551,9 @@ elif tab == "queue":
                     wmi = st.text_input("M.I.", max_chars=2, key="wmi")
                 with wc2:
                     wmob = st.text_input("Mobile (optional)", key="wmob")
-                # P3: Only show lane selection when category has priority lane enabled
-                wpri = "👤 Regular"  # default for categories without priority lane
-                if w_cat and w_cat.get("priority_lane_enabled"):
-                    wpri = st.radio("Lane:", ["👤 Regular", "⭐ Priority (Senior/PWD/Pregnant)"], horizontal=True, key="wpri")
-                    st.caption("⭐ Priority = Senior Citizen, PWD, or Pregnant. Ask for valid ID/proof before selecting.")
+                # Lane selection — always shown; submit handler enforces per-category rules
+                wpri = st.radio("Lane:", ["👤 Regular", "⭐ Priority (Senior/PWD/Pregnant)"], horizontal=True, key="wpri")
+                st.caption("⭐ Priority = Senior Citizen, PWD, or Pregnant. Ask for valid ID/proof before selecting.")
 
                 wbqms = ""
                 if role != "kiosk" and w_cat:
@@ -612,6 +597,9 @@ elif tab == "queue":
                         fsc = slot_counts(cats, fresh_q)
                         bv_check = wbqms.strip().upper() if wbqms else ""
                         wi_lane_val = "priority" if "Priority" in wpri else "regular"
+                        # Silently default to regular if category doesn't support priority lane
+                        if not w_cat.get("priority_lane_enabled"):
+                            wi_lane_val = "regular"
 
                         if is_duplicate(fresh_q, wlu, wfu, wmu_clean):
                             errs.append("Duplicate entry for this person today.")
