@@ -601,6 +601,15 @@ elif screen == "ticket":
         if t.get("lane") == "priority":
             pri_badge = '<div style="margin:4px 0;"><span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(245,158,11,.15);color:#f59e0b;">⭐ PRIORITY LANE</span></div>'
 
+        # Pre-compute display name and mobile for ticket
+        if t.get("last_name"):
+            _tdn = f"{t['last_name']}, {t['first_name']} {t.get('mi', '')}".strip()
+        elif t.get("bqms_number"):
+            _tdn = f"Walk-in #{t['bqms_number']}"
+        else:
+            _tdn = "Walk-in"
+        _tmob = f'<div style="font-size:12px;">📱 {t["mobile"]}</div>' if t.get("mobile") else ""
+
         st.markdown(f"""<div class="sss-card" style="border-top:4px solid #3399CC;text-align:center;">
 <div style="font-size:11px;opacity:.5;letter-spacing:2px;">MABILISSS QUEUE — {branch.get('name','').upper()}</div>
 <div style="font-weight:700;margin:4px 0;">{t['category']} — {t['service']}</div>
@@ -609,8 +618,8 @@ elif screen == "ticket":
 <div style="font-size:11px;opacity:.5;">RESERVATION NUMBER</div>
 <div class="sss-resnum">{t['res_num']}</div>
 <div style="border-top:1px dashed rgba(128,128,128,.2);margin:8px 0;"></div>
-<div style="font-size:12px;">{t['last_name']}, {t['first_name']} {t.get('mi','')}</div>
-<div style="font-size:12px;">📱 {t['mobile']}</div>
+<div style="font-size:12px;">{_tdn}</div>
+{_tmob}
 </div>""", unsafe_allow_html=True)
 
         st.markdown(f"""<div class="sss-card" style="border-left:4px solid #0066A1;">

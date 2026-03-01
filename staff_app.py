@@ -347,7 +347,7 @@ elif tab == "queue":
                 if nxt:
                     _has_serve_next = True
                     nxt_bqms = nxt.get("bqms_number", "")
-                    nxt_name = f"{nxt.get('last_name','')}, {nxt.get('first_name','')}".strip(", ") if nxt.get("last_name") else f"Walk-in #{nxt_bqms}"
+                    nxt_name = f"{nxt['last_name']}, {nxt['first_name']} {nxt.get('mi','')}".strip() if nxt.get("last_name") else (f"Walk-in #{nxt_bqms}" if nxt_bqms else "Walk-in")
                     short = c.get("short_label") or c["label"][:12]
                     lane_disp = f" ({lane_label})" if has_pri else ""
                     btn_label = f"📢 {c['icon']} {short}{lane_disp} → {nxt_bqms} ({nxt_name})"
@@ -417,12 +417,15 @@ elif tab == "queue":
                             else:
                                 arr_badge = " · Arrived"
 
+                        qr_dn = f"{qr['last_name']}, {qr['first_name']} {qr.get('mi','')}".strip() if qr.get("last_name") else (f"Walk-in #{qr_bqms}" if qr_bqms else "Walk-in")
+                        qr_mobile_h = f'<br/><span style="font-size:11px;opacity:.5;">📱 {qr["mobile"]}</span>' if qr.get("mobile") else ""
+
                         st.markdown(f"""<div class="sss-card" style="border-left:4px solid {'#22c55e' if is_arrived else '#f59e0b'};">
                             <span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{qr.get('res_num','')}</span>
                             {pri_icon}<br/>
-                            <strong>{qr.get('cat_icon','')} {qr['last_name']}, {qr['first_name']} {qr.get('mi','')}</strong><br/>
+                            <strong>{qr.get('cat_icon','')} {qr_dn}</strong><br/>
                             <span style="font-size:12px;opacity:.6;">{qr.get('category','')} → {qr.get('service','')}</span>
-                            {f'<br/><span style="font-size:11px;opacity:.5;">📱 {qr["mobile"]}</span>' if qr.get('mobile') else ''}
+                            {qr_mobile_h}
                             <br/><span style="font-size:11px;font-weight:700;color:{'#22c55e' if is_arrived else '#f59e0b'};">
                             {STATUS_LABELS.get(qr_status, qr_status)}{arr_badge}</span>
                             {f'<br/><span style="font-size:13px;font-weight:900;color:#22B8CF;">BQMS: {qr_bqms}</span>' if qr_bqms else ''}
@@ -693,14 +696,11 @@ elif tab == "queue":
     # ═══════════════════════════════════════════════════
     st.markdown("---")
     _fm = {
+        "📋 Active": "ACTIVE",
         "🔴 Need BQMS": "UNASSIGNED",
-        "All": "all",
-        "🏢 Kiosk": "KIOSK",
-        "📱 Online": "ONLINE",
-        "✅ Arrived": "ARRIVED",
         "🔵 Serving": "SERVING",
-        "✔ Done": "COMPLETED",
-        "🚫 Cancelled": "CANCELLED",
+        "📦 Done": "DONE",
+        "All": "all",
     }
     sel_f = st.radio("Filter:", list(_fm.keys()), horizontal=True, index=0)
     qf = _fm[sel_f]
@@ -743,13 +743,13 @@ elif tab == "queue":
         if lane_counters[ck] is not None:
             lane_counters[ck] += 1
 
-    if qf == "UNASSIGNED":
+    if qf == "ACTIVE":
+        filt = [r for r in filt if r.get("status") not in TERMINAL]
+    elif qf == "UNASSIGNED":
         # Use tier-sorted order
         filt = [e[0] for e in tier_sorted]
-    elif qf == "KIOSK":
-        filt = [r for r in filt if r.get("source") == "KIOSK"]
-    elif qf == "ONLINE":
-        filt = [r for r in filt if r.get("source") == "ONLINE"]
+    elif qf == "DONE":
+        filt = [r for r in filt if r.get("status") in TERMINAL]
     elif qf != "all":
         filt = [r for r in filt if r.get("status") == qf]
 
@@ -823,13 +823,22 @@ elif tab == "queue":
             if status == "VOID" and r.get("void_reason"):
                 void_note = f'<br/><span style="font-size:11px;color:#f59e0b;">Void: {r["void_reason"]}</span>'
 
+            # Pre-compute display name (safe for f-string)
+            if r.get("last_name"):
+                _dn = f"{r['last_name']}, {r['first_name']} {r.get('mi', '')}".strip()
+            elif r.get("bqms_number"):
+                _dn = f"Walk-in #{r['bqms_number']}"
+            else:
+                _dn = "Walk-in"
+            _mobile_h = f'<br/><span style="font-size:11px;opacity:.5;">📱 {r["mobile"]}</span>' if r.get("mobile") else ""
+
             st.markdown(f"""<div class="sss-card" style="border-left:4px solid {bdr};">
                 <div style="display:flex;justify-content:space-between;">
                     <div><span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{r.get('res_num','')}</span>
                         <span style="font-size:11px;opacity:.5;margin-left:6px;">{src}</span>{pri}{lane_badge}<br/>
-                        <strong>{r.get('cat_icon','')} {(r['last_name'] + ', ' + r['first_name'] + ' ' + r.get('mi','')) if r.get('last_name') else ('Walk-in #' + r.get('bqms_number','') if r.get('bqms_number') else 'Walk-in')}</strong><br/>
+                        <strong>{r.get('cat_icon','')} {_dn}</strong><br/>
                         <span style="font-size:12px;opacity:.6;">{r.get('category','')} → {r.get('service','')}</span>
-                        {f'<br/><span style="font-size:11px;opacity:.5;">📱 {r["mobile"]}</span>' if r.get('mobile') else ''}{void_note}
+                        {_mobile_h}{void_note}
                     </div>
                     <div style="text-align:right;">
                         <span style="display:inline-block;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;
