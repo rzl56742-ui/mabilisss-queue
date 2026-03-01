@@ -173,7 +173,7 @@ def update_branch(**kwargs):
 # ═══════════════════════════════════════════════════
 def add_category(cat_id, label, icon, short_label, avg_time, cap, sort_order,
                  bqms_prefix="", bqms_range_start=None, bqms_range_end=None,
-                 description="",
+                 description="", group_id=None, group_label="", group_icon="", lane_type="single",
                  priority_lane_enabled=False, priority_cap=10,
                  priority_bqms_start=None, priority_bqms_end=None):
     sb = get_supabase()
@@ -184,8 +184,14 @@ def add_category(cat_id, label, icon, short_label, avg_time, cap, sort_order,
         "bqms_prefix": bqms_prefix or "",
         "bqms_range_start": bqms_range_start,
         "bqms_range_end": bqms_range_end,
-        "description": description or "",
     }
+    # V2.3.0-P2 fields
+    row["description"] = description or ""
+    if group_id:
+        row["group_id"] = group_id
+    row["group_label"] = group_label or ""
+    row["group_icon"] = group_icon or ""
+    row["lane_type"] = lane_type or "single"
     # V2.3.0-P3 per-category priority lane fields
     row["priority_lane_enabled"] = bool(priority_lane_enabled)
     row["priority_cap"] = priority_cap or 10
@@ -575,10 +581,10 @@ def batch_assign_category(queue_list, category, assigned_by):
     def sort_key_issued(e):
         return e.get("issued_at") or "9999"
 
-    t1 = sorted([e for e in pool if e.get("status") == "ARRIVED" and e.get("priority") == "priority"], key=sort_key_arrived)
-    t2 = sorted([e for e in pool if e.get("status") == "ARRIVED" and e.get("priority") != "priority"], key=sort_key_arrived)
-    t3 = sorted([e for e in pool if e.get("status") != "ARRIVED" and e.get("priority") == "priority"], key=sort_key_issued)
-    t4 = sorted([e for e in pool if e.get("status") != "ARRIVED" and e.get("priority") != "priority"], key=sort_key_issued)
+    t1 = sorted([e for e in pool if e.get("status") == "ARRIVED" and e.get("lane", "regular") == "priority"], key=sort_key_arrived)
+    t2 = sorted([e for e in pool if e.get("status") == "ARRIVED" and e.get("lane", "regular") != "priority"], key=sort_key_arrived)
+    t3 = sorted([e for e in pool if e.get("status") != "ARRIVED" and e.get("lane", "regular") == "priority"], key=sort_key_issued)
+    t4 = sorted([e for e in pool if e.get("status") != "ARRIVED" and e.get("lane", "regular") != "priority"], key=sort_key_issued)
 
     ordered = t1 + t2 + t3 + t4
 
@@ -839,79 +845,70 @@ def update_password(user_id, new_password):
     reset_password(user_id, new_password)
 
 # ═══════════════════════════════════════════════════
-#  V2.3.0-P3 — SIMPLIFIED SERVICE LOOKUP (No P2 Courtesy)
+#  V2.3.0-P2 — CATEGORY GROUPING HELPERS
 # ═══════════════════════════════════════════════════
+def get_category_groups(cats):
+    """Organize categories into display groups for the member portal.
+    Returns list of group dicts:
+      {group_id, group_label, group_icon, lanes: [cat_list], is_single}
+    Groups are sorted by the lowest sort_order among their member categories.
+    Single/ungrouped categories become their own group."""
+    groups = {}
+    for c in cats:
+        gid = c.get("group_id") or c["id"]  # ungrouped → use cat id as group
+        if gid not in groups:
+            groups[gid] = {
+                "group_id": gid,
+                "group_label": c.get("group_label") or c["label"],
+                "group_icon": c.get("group_icon") or c["icon"],
+                "lanes": [],
+                "is_single": not c.get("group_id"),
+                "min_sort": c.get("sort_order", 999),
+            }
+        groups[gid]["lanes"].append(c)
+        groups[gid]["min_sort"] = min(groups[gid]["min_sort"], c.get("sort_order", 999))
+    # Sort groups by their minimum sort_order
+    return sorted(groups.values(), key=lambda g: g["min_sort"])
+
+
+def get_paired_regular(cats, cat):
+    """For a courtesy lane category, find its paired regular lane category."""
+    gid = cat.get("group_id")
+    if not gid:
+        return None
+    return next((c for c in cats if c.get("group_id") == gid
+                 and c.get("lane_type") == "regular"), None)
+
+
 def get_services_for_category(cats, cat, all_services=None):
-    """Get services for a category. Direct lookup — no courtesy inheritance."""
+    """Get services for a category. Courtesy lanes inherit from their paired Regular lane."""
     if all_services is None:
         all_services = get_services()
-    return [s for s in all_services if s.get("category_id") == cat["id"]]
+    cat_id = cat["id"]
+    lane = cat.get("lane_type", "single")
+    if lane == "courtesy":
+        # Inherit services from paired regular lane
+        regular = get_paired_regular(cats, cat)
+        if regular:
+            cat_id = regular["id"]
+    return [s for s in all_services if s.get("category_id") == cat_id]
 
 
-# ═══════════════════════════════════════════════════
-#  V2.3.0-P3 — DAILY BQMS/NOW-SERVING RESET (Decision #3)
-# ═══════════════════════════════════════════════════
-def reset_all_now_serving():
-    """Clear all now_serving and now_serving_priority fields across all categories.
-    Called on first staff login each day + manual reset button.
-    Returns count of rows reset."""
-    sb = get_supabase()
-    r = sb.table("bqms_state").select("category_id").execute()
-    count = 0
-    ts = now_pht().isoformat()
-    for row in (r.data or []):
-        sb.table("bqms_state").update({
-            "now_serving": "",
-            "now_serving_priority": "",
-            "updated_at": ts,
-        }).eq("category_id", row["category_id"]).execute()
-        count += 1
-    return count
-
-
-def check_daily_reset_needed(branch):
-    """Check if daily now-serving reset is needed.
-    Returns True if last_reset_date in branch_config != today."""
-    last_reset = branch.get("last_reset_date", "")
-    return last_reset != today_iso()
-
-
-def mark_daily_reset_done():
-    """Mark today's reset as completed in branch_config."""
-    sb = get_supabase()
-    sb.table("branch_config").update({
-        "last_reset_date": today_iso(),
-        "updated_at": now_pht().isoformat(),
-    }).eq("id", "main").execute()
-
-
-# ═══════════════════════════════════════════════════
-#  V2.3.0-P3 — PRIORITY LANE VALIDATION (Decision #4)
-# ═══════════════════════════════════════════════════
-def validate_priority_config(priority_lane_enabled, priority_bqms_start, priority_bqms_end,
-                             bqms_range_start, bqms_range_end):
-    """Validate priority lane configuration before saving category.
-    Returns (is_valid, error_message).
-    Decision #4: When priority_lane_enabled=True, priority_bqms_start AND _end must be > 0.
-    Also validates no overlap between regular and priority BQMS ranges."""
-    if not priority_lane_enabled:
-        return True, ""
-
-    # Must have both start AND end
-    if not priority_bqms_start or priority_bqms_start <= 0:
-        return False, "Priority BQMS Start must be greater than 0 when Priority Lane is enabled."
-    if not priority_bqms_end or priority_bqms_end <= 0:
-        return False, "Priority BQMS End must be greater than 0 when Priority Lane is enabled."
-    if priority_bqms_start > priority_bqms_end:
-        return False, "Priority BQMS Start cannot be greater than End."
-
-    # Check overlap with regular range
-    if bqms_range_start and bqms_range_end:
-        if not (priority_bqms_end < bqms_range_start or priority_bqms_start > bqms_range_end):
-            return False, (f"Priority range ({priority_bqms_start}-{priority_bqms_end}) "
-                          f"overlaps with Regular range ({bqms_range_start}-{bqms_range_end}).")
-
-    return True, ""
+def get_group_slot_info(cats, queue_list, group):
+    """Get combined slot info for a group (all lanes).
+    Returns dict: {regular: {cat, used, cap, remaining}, courtesy: {cat, used, cap, remaining}, total_remaining}"""
+    info = {"lanes": [], "total_remaining": 0}
+    for c in group["lanes"]:
+        used = count_daily_by_category(queue_list, c["id"])
+        cap = c.get("cap", 50)
+        rem = max(0, cap - used)
+        lane_info = {
+            "cat": c, "used": used, "cap": cap, "remaining": rem,
+            "lane_type": c.get("lane_type", "single"),
+        }
+        info["lanes"].append(lane_info)
+        info["total_remaining"] += rem
+    return info
 
 
 # ═══════════════════════════════════════════════════
