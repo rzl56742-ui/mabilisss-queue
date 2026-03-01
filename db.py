@@ -8,11 +8,7 @@
 """
 
 import streamlit as st
-try:
-    from supabase import create_client
-except ImportError as e:
-    st.error(f"❌ Supabase import failed: {e}")
-    st.stop()
+from supabase import create_client
 from datetime import date, datetime, timezone, timedelta
 import time, uuid, hashlib, re
 
@@ -177,9 +173,7 @@ def update_branch(**kwargs):
 # ═══════════════════════════════════════════════════
 def add_category(cat_id, label, icon, short_label, avg_time, cap, sort_order,
                  bqms_prefix="", bqms_range_start=None, bqms_range_end=None,
-                 description="", group_id=None, group_label="", group_icon="", lane_type="single",
-                 priority_lane_enabled=False, priority_cap=10,
-                 priority_bqms_start=None, priority_bqms_end=None):
+                 description=""):
     sb = get_supabase()
     row = {
         "id": cat_id, "label": label, "icon": icon,
@@ -188,19 +182,8 @@ def add_category(cat_id, label, icon, short_label, avg_time, cap, sort_order,
         "bqms_prefix": bqms_prefix or "",
         "bqms_range_start": bqms_range_start,
         "bqms_range_end": bqms_range_end,
+        "description": description or "",
     }
-    # V2.3.0-P2 fields
-    row["description"] = description or ""
-    if group_id:
-        row["group_id"] = group_id
-    row["group_label"] = group_label or ""
-    row["group_icon"] = group_icon or ""
-    row["lane_type"] = lane_type or "single"
-    # V2.3.0-P3 per-category priority lane fields
-    row["priority_lane_enabled"] = bool(priority_lane_enabled)
-    row["priority_cap"] = priority_cap or 10
-    row["priority_bqms_start"] = priority_bqms_start
-    row["priority_bqms_end"] = priority_bqms_end
     sb.table("categories").insert(row).execute()
     try:
         sb.table("bqms_state").insert({"category_id": cat_id}).execute()
@@ -320,42 +303,21 @@ def expire_old_reserved():
 # ═══════════════════════════════════════════════════
 #  SLOT / CAP LOGIC
 # ═══════════════════════════════════════════════════
-def count_daily_by_category(queue_list, cat_id, lane=None):
+def count_daily_by_category(queue_list, cat_id):
     """Count entries consuming a daily cap slot.
     ALL entries count EXCEPT: CANCELLED, VOID (these free slots).
     COMPLETED still counts — cap is for the WHOLE DAY.
-    EXPIRED still counts — they occupied a slot during the day.
-    If lane is specified, only count entries in that lane (P3)."""
-    entries = [r for r in queue_list
-               if r.get("category_id") == cat_id
-               and r.get("status") not in FREED]
-    if lane:
-        entries = [r for r in entries if r.get("lane", "regular") == lane]
-    return len(entries)
+    EXPIRED still counts — they occupied a slot during the day."""
+    return len([r for r in queue_list
+                if r.get("category_id") == cat_id
+                and r.get("status") not in FREED])
 
 def slot_counts(cats, queue_list):
-    """Returns {cat_id: {used, cap, remaining}} for each category.
-    P3: When priority_lane_enabled, adds sub-keys for each lane:
-        {used, cap, remaining, regular: {used, cap, remaining}, priority: {used, cap, remaining}}
-    """
     m = {}
     for c in cats:
-        cat_id = c["id"]
-        total_used = count_daily_by_category(queue_list, cat_id)
-        reg_cap = c.get("cap", 50)
-
-        if c.get("priority_lane_enabled"):
-            pri_cap = c.get("priority_cap", 10)
-            reg_used = count_daily_by_category(queue_list, cat_id, lane="regular")
-            pri_used = count_daily_by_category(queue_list, cat_id, lane="priority")
-            m[cat_id] = {
-                "used": total_used, "cap": reg_cap + pri_cap,
-                "remaining": max(0, reg_cap - reg_used) + max(0, pri_cap - pri_used),
-                "regular":  {"used": reg_used, "cap": reg_cap, "remaining": max(0, reg_cap - reg_used)},
-                "priority": {"used": pri_used, "cap": pri_cap, "remaining": max(0, pri_cap - pri_used)},
-            }
-        else:
-            m[cat_id] = {"used": total_used, "cap": reg_cap, "remaining": max(0, reg_cap - total_used)}
+        used = count_daily_by_category(queue_list, c["id"])
+        cap = c.get("cap", 50)
+        m[c["id"]] = {"used": used, "cap": cap, "remaining": max(0, cap - used)}
     return m
 
 def next_slot_num(queue_list):
@@ -369,9 +331,7 @@ def next_slot_num(queue_list):
 #  BQMS VALIDATION & SERIES
 # ═══════════════════════════════════════════════════
 def is_bqms_taken(queue_list, bqms_number, exclude_id=None):
-    """Check if BQMS# is already assigned today.
-    A BQMS number is 'taken' once assigned, even if the entry is COMPLETED or VOID.
-    Only CANCELLED/EXPIRED entries release their BQMS (but they typically don't have one).
+    """Check if BQMS# is already assigned today — ANY status (enforces true uniqueness).
     exclude_id: skip this entry (for edit scenarios)."""
     if not bqms_number:
         return False
@@ -379,8 +339,6 @@ def is_bqms_taken(queue_list, bqms_number, exclude_id=None):
     for r in queue_list:
         if exclude_id and r.get("id") == exclude_id:
             continue
-        # BQMS uniqueness: check ALL entries regardless of status
-        # (CANCELLED/EXPIRED rarely have BQMS assigned, so no practical impact)
         if (r.get("bqms_number") or "").strip().upper() == bn:
             return True
     return False
@@ -390,18 +348,11 @@ def extract_bqms_num(bqms_str):
     digits = re.sub(r'\D', '', str(bqms_str))
     return int(digits) if digits else None
 
-def validate_bqms_range(bqms_str, category, lane="regular"):
+def validate_bqms_range(bqms_str, category):
     """Check if BQMS# falls within the category's configured range.
-    P3: When lane='priority', validate against priority range instead.
     Returns (ok, message)."""
-    if lane == "priority" and category.get("priority_lane_enabled"):
-        rs = category.get("priority_bqms_start")
-        re_ = category.get("priority_bqms_end")
-        range_label = "priority"
-    else:
-        rs = category.get("bqms_range_start")
-        re_ = category.get("bqms_range_end")
-        range_label = "regular"
+    rs = category.get("bqms_range_start")
+    re_ = category.get("bqms_range_end")
     if rs is None or re_ is None:
         return True, ""  # No range configured — skip validation
     num = extract_bqms_num(bqms_str)
@@ -409,44 +360,26 @@ def validate_bqms_range(bqms_str, category, lane="regular"):
         return False, "Could not parse number from BQMS input."
     if rs <= num <= re_:
         return True, ""
-    return False, f"Number {num} is outside {category.get('short_label','')} {range_label} series ({rs}–{re_})."
+    return False, f"Number {num} is outside {category.get('short_label','')} series ({rs}–{re_})."
 
-def suggest_next_bqms(queue_list, category, lane="regular"):
-    """Auto-suggest the next BQMS# for a category based on assigned numbers today.
-    P3: When lane='priority', use priority BQMS range."""
+def suggest_next_bqms(queue_list, category):
+    """Auto-suggest the next BQMS# for a category based on ALL assigned numbers today.
+    Scans ALL entries (including completed/voided) to avoid reuse."""
     cat_id = category["id"]
     prefix = category.get("bqms_prefix", "") or ""
+    rs = category.get("bqms_range_start")
 
-    # P3: Select range based on lane
-    if lane == "priority" and category.get("priority_lane_enabled"):
-        rs = category.get("priority_bqms_start")
-        re_ = category.get("priority_bqms_end")
-    else:
-        rs = category.get("bqms_range_start")
-        re_ = category.get("bqms_range_end")
-
-    # Find highest BQMS number assigned in this category+lane today (ALL statuses)
+    # Find highest BQMS number assigned in this category today (any status)
     max_num = 0
     for r in queue_list:
         if r.get("category_id") != cat_id:
             continue
-        # Include ALL entries — even COMPLETED/VOID — to avoid suggesting reused numbers
-        # P3: only count entries in matching lane when priority_lane_enabled
-        if category.get("priority_lane_enabled"):
-            entry_lane = r.get("lane", "regular")
-            if entry_lane != lane:
-                continue
         bn = r.get("bqms_number", "")
         if not bn:
             continue
         n = extract_bqms_num(bn)
         if n and n > max_num:
-            # Verify this number is within our target range (avoid cross-lane contamination)
-            if rs and re_:
-                if rs <= n <= re_:
-                    max_num = n
-            else:
-                max_num = n
+            max_num = n
 
     if max_num > 0:
         suggested = max_num + 1
@@ -457,82 +390,49 @@ def suggest_next_bqms(queue_list, category, lane="regular"):
 
     return f"{prefix}{suggested}"
 
-def find_bqms_conflict_category(bqms_str, cats, current_cat_id, current_lane="regular"):
-    """Check if a BQMS# belongs to a different category's range (or different lane's range).
-    P3: Also checks priority BQMS ranges."""
+def find_bqms_conflict_category(bqms_str, cats, current_cat_id):
+    """Check if a BQMS# belongs to a different category's range."""
     num = extract_bqms_num(bqms_str)
     if num is None:
         return None
     for c in cats:
         if c["id"] == current_cat_id:
-            # Check if it conflicts with the OTHER lane's range in same category
-            if c.get("priority_lane_enabled"):
-                if current_lane == "regular":
-                    ps = c.get("priority_bqms_start")
-                    pe = c.get("priority_bqms_end")
-                    if ps and pe and ps <= num <= pe:
-                        return c  # Conflicts with own priority range
-                else:
-                    rs = c.get("bqms_range_start")
-                    re_ = c.get("bqms_range_end")
-                    if rs and re_ and rs <= num <= re_:
-                        return c  # Conflicts with own regular range
             continue
-        # Check regular range
         rs = c.get("bqms_range_start")
         re_ = c.get("bqms_range_end")
         if rs and re_ and rs <= num <= re_:
             return c
-        # P3: Check priority range
-        ps = c.get("priority_bqms_start")
-        pe = c.get("priority_bqms_end")
-        if ps and pe and ps <= num <= pe:
-            return c
     return None
 
 # ═══════════════════════════════════════════════════
-#  BQMS STATE (Now Serving) — P3: Dual lane support
+#  BQMS STATE (Now Serving)
 # ═══════════════════════════════════════════════════
 def get_bqms_state():
-    """Returns {cat_id: {"now_serving": str, "now_serving_priority": str}}."""
     sb = get_supabase()
     r = sb.table("bqms_state").select("*").execute()
-    return {row["category_id"]: {
-        "now_serving": row.get("now_serving", ""),
-        "now_serving_priority": row.get("now_serving_priority", ""),
-    } for row in (r.data or [])}
+    return {row["category_id"]: row.get("now_serving", "") for row in (r.data or [])}
 
-def update_bqms_state(category_id, now_serving, lane="regular"):
-    """Update now-serving display. P3: lane param routes to correct field."""
+def update_bqms_state(category_id, now_serving):
     sb = get_supabase()
-    if lane == "priority":
-        sb.table("bqms_state").update({
-            "now_serving_priority": now_serving,
-            "updated_at": now_pht().isoformat()
-        }).eq("category_id", category_id).execute()
-    else:
-        sb.table("bqms_state").update({
-            "now_serving": now_serving,
-            "updated_at": now_pht().isoformat()
-        }).eq("category_id", category_id).execute()
+    sb.table("bqms_state").update({
+        "now_serving": now_serving,
+        "updated_at": now_pht().isoformat()
+    }).eq("category_id", category_id).execute()
 
 def auto_update_now_serving(entry):
-    """Auto-update 'Now Serving' when entry status changes to SERVING or COMPLETED.
-    P3: Routes to correct lane field based on entry.lane."""
+    """Auto-update 'Now Serving' when entry status changes to SERVING or COMPLETED."""
     bqms = entry.get("bqms_number")
     cat_id = entry.get("category_id")
     if bqms and cat_id:
-        entry_lane = entry.get("lane", "regular")
-        update_bqms_state(cat_id, bqms, lane=entry_lane)
+        update_bqms_state(cat_id, bqms)
 
 # ═══════════════════════════════════════════════════
 #  QUEUE AHEAD / WAIT ESTIMATION
 # ═══════════════════════════════════════════════════
 def count_ahead(queue_list, entry):
-    """Count active entries in same category (and same lane, P3) with lower BQMS# (ahead in line)."""
+    """Count active entries in same category with lower BQMS# (ahead in line)."""
     my_bqms = entry.get("bqms_number", "")
     my_cat = entry.get("category_id", "")
-    my_lane = entry.get("lane", "regular")
     if not my_bqms:
         return 0
     my_num = extract_bqms_num(my_bqms)
@@ -546,119 +446,10 @@ def count_ahead(queue_list, entry):
             continue
         if r.get("status") in TERMINAL or r.get("status") == "SERVING":
             continue
-        # P3: only count entries in same lane when priority_lane_enabled is active
-        # (determined by checking if entry has an explicit lane that differs)
-        r_lane = r.get("lane", "regular")
-        if my_lane != r_lane:
-            continue
         rn = extract_bqms_num(r.get("bqms_number", ""))
         if rn is not None and rn < my_num:
             count += 1
     return count
-
-
-def get_next_to_serve(queue_list, category_id, lane="regular"):
-    """Find the next entry to serve: lowest BQMS# in ARRIVED status for given category/lane.
-    Returns the entry dict, or None if no entries waiting."""
-    best = None
-    best_num = None
-    for r in queue_list:
-        if r.get("category_id") != category_id:
-            continue
-        if r.get("status") != "ARRIVED":
-            continue
-        if not r.get("bqms_number"):
-            continue
-        r_lane = r.get("lane", "regular")
-        if r_lane != lane:
-            continue
-        rn = extract_bqms_num(r.get("bqms_number", ""))
-        if rn is not None and (best_num is None or rn < best_num):
-            best = r
-            best_num = rn
-    return best
-
-
-def get_unserved_lower_bqms(queue_list, entry):
-    """Find ARRIVED entries in same category/lane with lower BQMS# than given entry.
-    Returns list of (bqms_number, entry) tuples sorted ascending. Used for skip warnings."""
-    my_bqms = entry.get("bqms_number", "")
-    my_cat = entry.get("category_id", "")
-    my_lane = entry.get("lane", "regular")
-    my_num = extract_bqms_num(my_bqms)
-    if my_num is None:
-        return []
-    results = []
-    for r in queue_list:
-        if r.get("id") == entry.get("id"):
-            continue
-        if r.get("category_id") != my_cat:
-            continue
-        if r.get("status") != "ARRIVED":
-            continue
-        if r.get("lane", "regular") != my_lane:
-            continue
-        rn = extract_bqms_num(r.get("bqms_number", ""))
-        if rn is not None and rn < my_num:
-            results.append((r.get("bqms_number", ""), r))
-    results.sort(key=lambda x: extract_bqms_num(x[0]) or 0)
-    return results
-
-
-def tier_sort_unassigned(queue_list, categories):
-    """Sort unassigned entries by 4-tier model, grouped by category.
-    Returns list of (entry, tier_label, position_in_cat, cat_obj) tuples.
-    Tier order: T1 Priority+ARRIVED, T2 Regular+ARRIVED,
-                T3 Priority+RESERVED, T4 Regular+RESERVED.
-    Within each tier: FCFS by arrived_at (T1/T2) or issued_at (T3/T4)."""
-    unassigned = [r for r in queue_list
-                  if not r.get("bqms_number")
-                  and r.get("status") not in TERMINAL]
-    if not unassigned:
-        return []
-
-    result = []
-
-    for cat in categories:
-        cat_id = cat["id"]
-        cat_entries = [e for e in unassigned if e.get("category_id") == cat_id]
-        if not cat_entries:
-            continue
-
-        def tier_key(e):
-            is_arrived = e.get("status") == "ARRIVED"
-            lane = e.get("lane", "regular")
-            is_pri = lane == "priority"
-            if is_arrived and is_pri:
-                tier = 0  # T1
-            elif is_arrived:
-                tier = 1  # T2
-            elif is_pri:
-                tier = 2  # T3
-            else:
-                tier = 3  # T4
-            ts = e.get("arrived_at", "") if is_arrived else e.get("issued_at", "9999")
-            return (tier, ts)
-
-        cat_entries.sort(key=tier_key)
-        tier_labels = {0: "\u2b50 Priority \u00b7 Arrived", 1: "\U0001f464 Regular \u00b7 Arrived",
-                       2: "\u2b50 Priority \u00b7 Reserved", 3: "\U0001f464 Regular \u00b7 Reserved"}
-
-        for pos, e in enumerate(cat_entries):
-            is_arrived = e.get("status") == "ARRIVED"
-            lane = e.get("lane", "regular")
-            is_pri = lane == "priority"
-            if is_arrived and is_pri:
-                tier = 0
-            elif is_arrived:
-                tier = 1
-            elif is_pri:
-                tier = 2
-            else:
-                tier = 3
-            result.append((e, tier_labels[tier], pos + 1, cat))
-
-    return result
 
 # ═══════════════════════════════════════════════════
 #  V2.3.0 — BATCH ASSIGN
@@ -670,11 +461,9 @@ def batch_assign_category(queue_list, category, assigned_by):
       2. ARRIVED + regular   → arrived_at ASC
       3. RESERVED + priority → issued_at ASC
       4. RESERVED + regular  → issued_at ASC
-    P3: When priority_lane_enabled, assigns BQMS# from lane-specific ranges.
     Returns (count_assigned, first_bqms, last_bqms) or (0, None, None)."""
     cat_id = category["id"]
     prefix = category.get("bqms_prefix", "") or ""
-    has_pri_lane = category.get("priority_lane_enabled", False)
 
     # Collect unassigned, non-terminal entries for this category
     pool = [e for e in queue_list
@@ -690,61 +479,40 @@ def batch_assign_category(queue_list, category, assigned_by):
     def sort_key_issued(e):
         return e.get("issued_at") or "9999"
 
-    t1 = sorted([e for e in pool if e.get("status") == "ARRIVED" and e.get("lane", "regular") == "priority"], key=sort_key_arrived)
-    t2 = sorted([e for e in pool if e.get("status") == "ARRIVED" and e.get("lane", "regular") != "priority"], key=sort_key_arrived)
-    t3 = sorted([e for e in pool if e.get("status") != "ARRIVED" and e.get("lane", "regular") == "priority"], key=sort_key_issued)
-    t4 = sorted([e for e in pool if e.get("status") != "ARRIVED" and e.get("lane", "regular") != "priority"], key=sort_key_issued)
+    t1 = sorted([e for e in pool if e.get("status") == "ARRIVED" and e.get("priority") == "priority"], key=sort_key_arrived)
+    t2 = sorted([e for e in pool if e.get("status") == "ARRIVED" and e.get("priority") != "priority"], key=sort_key_arrived)
+    t3 = sorted([e for e in pool if e.get("status") != "ARRIVED" and e.get("priority") == "priority"], key=sort_key_issued)
+    t4 = sorted([e for e in pool if e.get("status") != "ARRIVED" and e.get("priority") != "priority"], key=sort_key_issued)
 
     ordered = t1 + t2 + t3 + t4
 
-    # P3: Get starting numbers for each lane
-    if has_pri_lane:
-        # Two separate BQMS counters
-        next_str_reg = suggest_next_bqms(queue_list, category, lane="regular")
-        next_str_pri = suggest_next_bqms(queue_list, category, lane="priority")
-
-        next_num_reg = extract_bqms_num(next_str_reg) if next_str_reg else None
-        if next_num_reg is None:
-            next_num_reg = category.get("bqms_range_start") or 1
-
-        next_num_pri = extract_bqms_num(next_str_pri) if next_str_pri else None
-        if next_num_pri is None:
-            next_num_pri = category.get("priority_bqms_start") or 1
+    # Get starting BQMS number
+    next_num_str = suggest_next_bqms(queue_list, category)
+    if not next_num_str:
+        rs = category.get("bqms_range_start")
+        next_num = rs if rs else 1
     else:
-        # Single BQMS counter (original behavior)
-        next_num_str = suggest_next_bqms(queue_list, category)
-        if not next_num_str:
-            rs = category.get("bqms_range_start")
-            next_num_reg = rs if rs else 1
-        else:
-            next_num_reg = extract_bqms_num(next_num_str)
-            if next_num_reg is None:
-                next_num_reg = category.get("bqms_range_start", 1)
+        next_num = extract_bqms_num(next_num_str)
+        if next_num is None:
+            next_num = category.get("bqms_range_start", 1)
 
     ts = now_pht().isoformat()
     first_bqms = None
     last_bqms = None
 
     for entry in ordered:
-        # P3: Determine lane and pick correct counter
-        entry_lane = entry.get("lane", "regular")
-        if has_pri_lane and entry_lane == "priority":
-            bqms_str = f"{prefix}{next_num_pri}"
-            next_num_pri += 1
-        else:
-            bqms_str = f"{prefix}{next_num_reg}"
-            next_num_reg += 1
-
+        bqms_str = f"{prefix}{next_num}"
         if first_bqms is None:
             first_bqms = bqms_str
         last_bqms = bqms_str
 
-        upd = {"bqms_number": bqms_str, "bqms_assigned_at": ts}
+        upd = {"bqms_number": bqms_str}
         # Promote RESERVED → ARRIVED
         if entry.get("status") == "RESERVED":
             upd["status"] = "ARRIVED"
             upd["arrived_at"] = ts
         update_queue_entry(entry["id"], **upd)
+        next_num += 1
 
     # Log the batch assign
     insert_batch_log(cat_id, category.get("label", ""), len(ordered), assigned_by,
@@ -776,33 +544,26 @@ def quick_checkin(entry_id):
 # ═══════════════════════════════════════════════════
 #  V2.3.0 — PRE-8AM TRACKER HELPERS
 # ═══════════════════════════════════════════════════
-def count_arrived_in_category(queue_list, cat_id, lane=None):
-    """Count members physically at the branch (ARRIVED status) in a category.
-    P3: Optional lane filter."""
-    entries = [e for e in queue_list
-               if e.get("category_id") == cat_id
-               and e.get("status") == "ARRIVED"
-               and e.get("status") not in TERMINAL]
-    if lane:
-        entries = [e for e in entries if e.get("lane", "regular") == lane]
-    return len(entries)
+def count_arrived_in_category(queue_list, cat_id):
+    """Count members physically at the branch (ARRIVED status) in a category."""
+    return len([e for e in queue_list
+                if e.get("category_id") == cat_id
+                and e.get("status") == "ARRIVED"
+                and e.get("status") not in TERMINAL])
 
 
 def count_reserved_position(queue_list, entry):
     """Get this entry's position among RESERVED entries in its category (by issued_at).
-    P3: Filters by same lane when entry has explicit lane.
-    Returns 1-based position."""
+    Returns 1-based position. E.g., position 3 = two reservations were made earlier."""
     cat_id = entry.get("category_id", "")
     my_issued = entry.get("issued_at", "9999")
     my_id = entry.get("id", "")
-    my_lane = entry.get("lane", "regular")
 
     reserved = [e for e in queue_list
                 if e.get("category_id") == cat_id
                 and e.get("status") == "RESERVED"
                 and not e.get("bqms_number")
-                and e.get("status") not in TERMINAL
-                and e.get("lane", "regular") == my_lane]
+                and e.get("status") not in TERMINAL]
     reserved.sort(key=lambda e: e.get("issued_at", "9999"))
 
     for idx, e in enumerate(reserved):
@@ -816,7 +577,6 @@ def count_reserved_position(queue_list, entry):
 # ═══════════════════════════════════════════════════
 def calc_est_wait(queue_list, entry, categories):
     """Calculate estimated wait time based on today's actual service speed.
-    P3: count_ahead is already lane-aware, so this automatically works per-lane.
     Returns (est_min_low, est_min_high, source_label) or (None, None, None)."""
     cat_id = entry.get("category_id", "")
     cat_obj = next((c for c in categories if c["id"] == cat_id), None)
@@ -828,13 +588,10 @@ def calc_est_wait(queue_list, entry, categories):
         return 0, 0, "next"
 
     # Try actual speed from today's completed entries with serving_at
-    # P3: filter by lane for more accurate per-lane speed
-    entry_lane = entry.get("lane", "regular")
     completed = [e for e in queue_list
                  if e.get("category_id") == cat_id
                  and e.get("status") == "COMPLETED"
-                 and e.get("serving_at") and e.get("completed_at")
-                 and (not cat_obj.get("priority_lane_enabled") or e.get("lane", "regular") == entry_lane)]
+                 and e.get("serving_at") and e.get("completed_at")]
 
     avg_minutes = None
     if len(completed) >= 3:
@@ -954,74 +711,7 @@ def update_password(user_id, new_password):
     reset_password(user_id, new_password)
 
 # ═══════════════════════════════════════════════════
-#  V2.3.0-P2 — CATEGORY GROUPING HELPERS
-# ═══════════════════════════════════════════════════
-def get_category_groups(cats):
-    """Organize categories into display groups for the member portal.
-    Returns list of group dicts:
-      {group_id, group_label, group_icon, lanes: [cat_list], is_single}
-    Groups are sorted by the lowest sort_order among their member categories.
-    Single/ungrouped categories become their own group."""
-    groups = {}
-    for c in cats:
-        gid = c.get("group_id") or c["id"]  # ungrouped → use cat id as group
-        if gid not in groups:
-            groups[gid] = {
-                "group_id": gid,
-                "group_label": c.get("group_label") or c["label"],
-                "group_icon": c.get("group_icon") or c["icon"],
-                "lanes": [],
-                "is_single": not c.get("group_id"),
-                "min_sort": c.get("sort_order", 999),
-            }
-        groups[gid]["lanes"].append(c)
-        groups[gid]["min_sort"] = min(groups[gid]["min_sort"], c.get("sort_order", 999))
-    # Sort groups by their minimum sort_order
-    return sorted(groups.values(), key=lambda g: g["min_sort"])
-
-
-def get_paired_regular(cats, cat):
-    """For a courtesy lane category, find its paired regular lane category."""
-    gid = cat.get("group_id")
-    if not gid:
-        return None
-    return next((c for c in cats if c.get("group_id") == gid
-                 and c.get("lane_type") == "regular"), None)
-
-
-def get_services_for_category(cats, cat, all_services=None):
-    """Get services for a category. Courtesy lanes inherit from their paired Regular lane."""
-    if all_services is None:
-        all_services = get_services()
-    cat_id = cat["id"]
-    lane = cat.get("lane_type", "single")
-    if lane == "courtesy":
-        # Inherit services from paired regular lane
-        regular = get_paired_regular(cats, cat)
-        if regular:
-            cat_id = regular["id"]
-    return [s for s in all_services if s.get("category_id") == cat_id]
-
-
-def get_group_slot_info(cats, queue_list, group):
-    """Get combined slot info for a group (all lanes).
-    Returns dict: {regular: {cat, used, cap, remaining}, courtesy: {cat, used, cap, remaining}, total_remaining}"""
-    info = {"lanes": [], "total_remaining": 0}
-    for c in group["lanes"]:
-        used = count_daily_by_category(queue_list, c["id"])
-        cap = c.get("cap", 50)
-        rem = max(0, cap - used)
-        lane_info = {
-            "cat": c, "used": used, "cap": cap, "remaining": rem,
-            "lane_type": c.get("lane_type", "single"),
-        }
-        info["lanes"].append(lane_info)
-        info["total_remaining"] += rem
-    return info
-
-
-# ═══════════════════════════════════════════════════
-#  V2.3.0-P2 — REORDER HELPERS
+#  REORDER HELPERS
 # ═══════════════════════════════════════════════════
 def swap_category_order(cat_id_a, cat_id_b):
     """Swap sort_order of two categories."""
@@ -1048,7 +738,7 @@ def swap_service_order(svc_id_a, svc_id_b):
 
 
 # ═══════════════════════════════════════════════════
-#  V2.3.0-P2 — RESERVATION TIME GATE
+#  RESERVATION TIME GATE
 # ═══════════════════════════════════════════════════
 def is_reservation_open(branch):
     """Check if online reservations are currently open.
