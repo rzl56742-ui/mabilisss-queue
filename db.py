@@ -556,6 +556,53 @@ def count_ahead(queue_list, entry):
     return count
 
 
+def get_next_to_serve(queue_list, category_id, lane="regular"):
+    """Find the next entry to serve: lowest BQMS# in ARRIVED status for given category/lane.
+    Returns the entry dict, or None if no entries waiting."""
+    best = None
+    best_num = None
+    for r in queue_list:
+        if r.get("category_id") != category_id:
+            continue
+        if r.get("status") != "ARRIVED":
+            continue
+        if not r.get("bqms_number"):
+            continue
+        r_lane = r.get("lane", "regular")
+        if r_lane != lane:
+            continue
+        rn = extract_bqms_num(r.get("bqms_number", ""))
+        if rn is not None and (best_num is None or rn < best_num):
+            best = r
+            best_num = rn
+    return best
+
+
+def get_unserved_lower_bqms(queue_list, entry):
+    """Find ARRIVED entries in same category/lane with lower BQMS# than given entry.
+    Returns list of (bqms_number, entry) tuples sorted ascending. Used for skip warnings."""
+    my_bqms = entry.get("bqms_number", "")
+    my_cat = entry.get("category_id", "")
+    my_lane = entry.get("lane", "regular")
+    my_num = extract_bqms_num(my_bqms)
+    if my_num is None:
+        return []
+    results = []
+    for r in queue_list:
+        if r.get("id") == entry.get("id"):
+            continue
+        if r.get("category_id") != my_cat:
+            continue
+        if r.get("status") != "ARRIVED":
+            continue
+        if r.get("lane", "regular") != my_lane:
+            continue
+        rn = extract_bqms_num(r.get("bqms_number", ""))
+        if rn is not None and rn < my_num:
+            results.append((r.get("bqms_number", ""), r))
+    results.sort(key=lambda x: extract_bqms_num(x[0]) or 0)
+    return results
+
 
 def tier_sort_unassigned(queue_list, categories):
     """Sort unassigned entries by 4-tier model, grouped by category.

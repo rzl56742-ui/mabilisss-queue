@@ -29,7 +29,7 @@ st.markdown("""<style>
 .sss-card strong,.sss-card b{color:var(--text-color,#1a1a2e)}
 .sss-metric{text-align:center;padding:14px 8px;border-radius:10px;background:var(--secondary-background-color,#f5f5f5);border:1px solid rgba(128,128,128,.1)}
 .sss-metric .val{font-size:30px;font-weight:900;line-height:1.2}
-.sss-metric .lbl{font-size:12px;opacity:.8;margin-top:4px;font-weight:600}
+.sss-metric .lbl{font-size:12px;color:var(--text-color,#555);margin-top:4px;font-weight:600}
 .sss-alert{border-radius:8px;padding:12px 16px;margin-bottom:12px;font-weight:600;text-align:center}
 .sss-alert-red{background:rgba(220,53,69,.15);color:#ef4444;border:1px solid rgba(220,53,69,.3)}
 .sss-alert-green{background:rgba(15,157,88,.12);color:#22c55e;border:1px solid rgba(15,157,88,.25)}
@@ -639,12 +639,14 @@ elif screen == "track_input":
     if st.button("← Back to Home"):
         go("home")
     st.markdown('<div style="text-align:center;"><span style="font-size:36px;">🔍</span><h3>Track Your Queue</h3></div>', unsafe_allow_html=True)
-    st.caption("💡 Online = **R-** prefix (R-0215-001). Walk-in = **K-** prefix (K-0215-001).")
+    st.caption("💡 Online = **R-** prefix (R-0215-001). Walk-in = **K-** prefix (K-0215-001). BQMS = queue number assigned at branch.")
 
-    track_mode = st.radio("Search by:", ["📱 Mobile Number", "#️⃣ Reservation Number"], horizontal=True)
+    track_mode = st.radio("Search by:", ["📱 Mobile Number", "#️⃣ Reservation Number", "🎫 BQMS Number"], horizontal=True)
     with st.form("track_form"):
         if "Mobile" in track_mode:
             track_val = st.text_input("Mobile number", placeholder="09171234567")
+        elif "BQMS" in track_mode:
+            track_val = st.text_input("BQMS Number", placeholder="1001")
         else:
             track_val = st.text_input("Reservation #", placeholder="R-0215-005 or K-0215-001")
 
@@ -666,6 +668,18 @@ elif screen == "track_input":
                     if not found:
                         for r in fresh:
                             if r.get("mobile", "") == v_clean:
+                                found = r
+                                break
+                elif "BQMS" in track_mode:
+                    vu = v.upper()
+                    # Search by BQMS number — prefer active entry
+                    for r in fresh:
+                        if r.get("bqms_number", "") == vu and r.get("status") not in TERMINAL:
+                            found = r
+                            break
+                    if not found:
+                        for r in fresh:
+                            if r.get("bqms_number", "") == vu:
                                 found = r
                                 break
                 else:
@@ -830,14 +844,28 @@ elif screen == "tracker":
                                          or e.get("lane", "regular") == entry_lane_pre)])
                 is_arrived = t.get("status") == "ARRIVED"
                 batch_time = branch.get("batch_assign_time", "08:00")
+                # Time-aware messaging: check if we're before or after batch assign time
+                try:
+                    bh, bm = [int(x) for x in batch_time.split(":")]
+                    batch_passed = now.hour > bh or (now.hour == bh and now.minute >= bm)
+                except (ValueError, TypeError):
+                    batch_passed = now.hour >= 8
 
                 if is_arrived:
-                    # Member is at the branch, checked in, waiting for batch assign
-                    st.markdown(f"""<div class="sss-alert sss-alert-green">
-                        ✅ <strong>You're checked in!</strong><br/>
-                        BQMS numbers will be assigned at <b>{batch_time} AM</b>.<br/>
-                        You are among <b>{at_branch} members</b> at the branch for <b>{cat_name}</b>.
-                    </div>""", unsafe_allow_html=True)
+                    # Member is at the branch, checked in, waiting for BQMS assign
+                    if batch_passed:
+                        st.markdown(f"""<div class="sss-alert sss-alert-green">
+                            ✅ <strong>You're checked in!</strong><br/>
+                            BQMS numbers are being assigned. Please wait — staff will assign your number shortly.<br/>
+                            You are among <b>{at_branch} members</b> at the branch for <b>{cat_name}</b>.
+                        </div>""", unsafe_allow_html=True)
+                    else:
+                        bt_display = format_time_12h(batch_time)
+                        st.markdown(f"""<div class="sss-alert sss-alert-green">
+                            ✅ <strong>You're checked in!</strong><br/>
+                            BQMS numbers will be assigned starting at <b>{bt_display}</b>.<br/>
+                            You are among <b>{at_branch} members</b> at the branch for <b>{cat_name}</b>.
+                        </div>""", unsafe_allow_html=True)
                 else:
                     # Member reserved online, not yet at branch
                     m1, m2 = st.columns(2)
@@ -847,12 +875,21 @@ elif screen == "tracker":
                     with m2:
                         st.markdown(f'<div class="sss-metric"><div class="val" style="color:#3399CC;">#{my_pos}</div><div class="lbl">Your Online Position<br/><span style="font-size:10px;">of {total_online} in {cat_name}</span></div></div>', unsafe_allow_html=True)
 
-                    st.markdown(f"""<div class="sss-alert sss-alert-yellow">
-                        ⏳ <strong>Waiting for BQMS Number</strong><br/>
-                        Your queue number will be assigned at <b>{batch_time} AM</b> when the branch opens.<br/>
-                        <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span><br/>
-                        <span style="font-size:12px;opacity:.7;">💡 Walk-in members who arrive early may be served first. Your slot is secured — no need to rush!</span>
-                    </div>""", unsafe_allow_html=True)
+                    if batch_passed:
+                        st.markdown(f"""<div class="sss-alert sss-alert-yellow">
+                            ⏳ <strong>Waiting for BQMS Number</strong><br/>
+                            The branch is open. Please proceed to <b>{branch.get('name','')}</b> to get your queue number assigned.<br/>
+                            <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span><br/>
+                            <span style="font-size:12px;opacity:.7;">💡 Walk-in members who arrive early may be served first. Your slot is secured — no need to rush!</span>
+                        </div>""", unsafe_allow_html=True)
+                    else:
+                        bt_display = format_time_12h(batch_time)
+                        st.markdown(f"""<div class="sss-alert sss-alert-yellow">
+                            ⏳ <strong>Waiting for BQMS Number</strong><br/>
+                            Your queue number will be assigned starting at <b>{bt_display}</b> when the branch opens.<br/>
+                            <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span><br/>
+                            <span style="font-size:12px;opacity:.7;">💡 Walk-in members who arrive early may be served first. Your slot is secured — no need to rush!</span>
+                        </div>""", unsafe_allow_html=True)
 
         # ── Action buttons ──
         c1, c2 = st.columns(2)

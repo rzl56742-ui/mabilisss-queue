@@ -17,6 +17,7 @@ from db import (
     insert_queue_entry, update_queue_entry,
     cancel_entry, void_entry, expire_old_reserved,
     get_bqms_state, update_bqms_state, auto_update_now_serving,
+    get_next_to_serve, get_unserved_lower_bqms,
     get_users, authenticate, add_user, update_user, delete_user,
     reset_password, update_password,
     add_category, update_category, delete_category, has_active_entries,
@@ -334,6 +335,44 @@ elif tab == "queue":
                     f"<span class='sss-ns-badge'>{disp_reg}</span></div>",
                     unsafe_allow_html=True)
 
+    # ── SERVE NEXT — One-click workflow per category/lane ──
+    if can_edit_queue and role != "kiosk":
+        st.markdown('<div style="font-size:11px;opacity:.5;margin:8px 0 4px;">📢 SERVE NEXT</div>', unsafe_allow_html=True)
+        _has_serve_next = False
+        for c in cats:
+            has_pri = c.get("priority_lane_enabled")
+            lanes_to_check = [("regular", "👤 Regular")] + ([("priority", "⭐ Priority")] if has_pri else [])
+            for lane_key, lane_label in lanes_to_check:
+                nxt = get_next_to_serve(queue, c["id"], lane=lane_key)
+                if nxt:
+                    _has_serve_next = True
+                    nxt_bqms = nxt.get("bqms_number", "")
+                    nxt_name = f"{nxt.get('last_name','')}, {nxt.get('first_name','')}".strip(", ") if nxt.get("last_name") else f"Walk-in #{nxt_bqms}"
+                    short = c.get("short_label") or c["label"][:12]
+                    lane_disp = f" ({lane_label})" if has_pri else ""
+                    btn_label = f"📢 {c['icon']} {short}{lane_disp} → {nxt_bqms} ({nxt_name})"
+                    if st.button(btn_label, key=f"sn_{c['id']}_{lane_key}", use_container_width=True, type="primary"):
+                        ts = now_pht().isoformat()
+                        update_queue_entry(nxt["id"], status="SERVING", serving_at=ts)
+                        auto_update_now_serving(nxt)
+                        st.rerun()
+                else:
+                    # Check if there are entries pending BQMS
+                    pending = [r for r in queue if r.get("category_id") == c["id"]
+                               and r.get("lane", "regular") == lane_key
+                               and r.get("status") in ("RESERVED", "ARRIVED")
+                               and not r.get("bqms_number")]
+                    arrived_no_bqms = [r for r in queue if r.get("category_id") == c["id"]
+                                       and r.get("lane", "regular") == lane_key
+                                       and r.get("status") == "ARRIVED"
+                                       and not r.get("bqms_number")]
+                    if pending or arrived_no_bqms:
+                        short = c.get("short_label") or c["label"][:12]
+                        lane_disp = f" ({lane_label})" if has_pri else ""
+                        st.markdown(f"<div style='font-size:12px;opacity:.5;padding:2px 8px;'>⏳ {c['icon']} {short}{lane_disp} — {len(pending)} entries pending BQMS</div>", unsafe_allow_html=True)
+        if not _has_serve_next:
+            st.markdown('<div style="font-size:12px;opacity:.5;padding:2px 8px;">✅ No entries waiting to be served</div>', unsafe_allow_html=True)
+
     # ═══════════════════════════════════════════════════
     #  V2.3.0 — QUICK CHECK-IN (Guard + Staff)
     # ═══════════════════════════════════════════════════
@@ -543,9 +582,9 @@ elif tab == "queue":
 
                 wc1, wc2 = st.columns(2)
                 with wc1:
-                    wl = st.text_input("Last Name *", key="wl")
+                    wl = st.text_input("Last Name", key="wl", placeholder="(optional)")
                 with wc2:
-                    wf = st.text_input("First Name *", key="wf")
+                    wf = st.text_input("First Name", key="wf", placeholder="(optional)")
                 wc1, wc2 = st.columns([1, 3])
                 with wc1:
                     wmi = st.text_input("M.I.", max_chars=2, key="wmi")
@@ -585,10 +624,7 @@ elif tab == "queue":
                     errs = []
                     if not w_cat:
                         errs.append("Select category.")
-                    if not wlu:
-                        errs.append("Last Name required.")
-                    if not wfu:
-                        errs.append("First Name required.")
+                    # Names are optional for walk-ins — if blank, will display as "Walk-in #BQMS"
                     if wmu_raw and not wmu_clean:
                         errs.append("Invalid mobile format (09XX, 11 digits).")
 
@@ -601,7 +637,7 @@ elif tab == "queue":
                         if not w_cat.get("priority_lane_enabled"):
                             wi_lane_val = "regular"
 
-                        if is_duplicate(fresh_q, wlu, wfu, wmu_clean):
+                        if wlu and wfu and is_duplicate(fresh_q, wlu, wfu, wmu_clean):
                             errs.append("Duplicate entry for this person today.")
                         # P3: lane-specific cap check
                         cat_sc = fsc.get(w_cat["id"], {})
@@ -791,7 +827,7 @@ elif tab == "queue":
                 <div style="display:flex;justify-content:space-between;">
                     <div><span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{r.get('res_num','')}</span>
                         <span style="font-size:11px;opacity:.5;margin-left:6px;">{src}</span>{pri}{lane_badge}<br/>
-                        <strong>{r.get('cat_icon','')} {r['last_name']}, {r['first_name']} {r.get('mi','')}</strong><br/>
+                        <strong>{r.get('cat_icon','')} {(r['last_name'] + ', ' + r['first_name'] + ' ' + r.get('mi','')) if r.get('last_name') else ('Walk-in #' + r.get('bqms_number','') if r.get('bqms_number') else 'Walk-in')}</strong><br/>
                         <span style="font-size:12px;opacity:.6;">{r.get('category','')} → {r.get('service','')}</span>
                         {f'<br/><span style="font-size:11px;opacity:.5;">📱 {r["mobile"]}</span>' if r.get('mobile') else ''}{void_note}
                     </div>
@@ -872,10 +908,16 @@ elif tab == "queue":
                     ac1, ac2, ac3 = st.columns(3)
                     with ac1:
                         if st.button("🔵 Serving", key=f"srv_{rid}", use_container_width=True):
-                            ts = now_pht().isoformat()
-                            update_queue_entry(rid, status="SERVING", serving_at=ts)
-                            auto_update_now_serving(r)  # AUTO-UPDATE Now Serving
-                            st.rerun()
+                            # Fix #9: Check for unserved lower BQMS entries
+                            skipped = get_unserved_lower_bqms(queue, r)
+                            if skipped:
+                                st.session_state[f"skip_confirm_{rid}"] = [b for b, _ in skipped]
+                                st.rerun()
+                            else:
+                                ts = now_pht().isoformat()
+                                update_queue_entry(rid, status="SERVING", serving_at=ts)
+                                auto_update_now_serving(r)  # AUTO-UPDATE Now Serving
+                                st.rerun()
                     with ac2:
                         if st.button("✅ Complete", key=f"dn_{rid}", use_container_width=True):
                             ts = now_pht().isoformat()
@@ -886,6 +928,23 @@ elif tab == "queue":
                         if is_th and st.button("⚙️ Void", key=f"vo_{rid}", use_container_width=True):
                             st.session_state[f"void_{rid}"] = True
                             st.rerun()
+
+                    # ── Skip confirmation dialog ──
+                    if st.session_state.get(f"skip_confirm_{rid}"):
+                        skipped_nums = st.session_state[f"skip_confirm_{rid}"]
+                        st.warning(f"⚠️ BQMS {', '.join(skipped_nums)} {'has' if len(skipped_nums)==1 else 'have'}n't been served yet. Serve {r.get('bqms_number','')} anyway?")
+                        sc1, sc2 = st.columns(2)
+                        with sc1:
+                            if st.button("✅ Yes, skip", key=f"skip_yes_{rid}", type="primary", use_container_width=True):
+                                del st.session_state[f"skip_confirm_{rid}"]
+                                ts = now_pht().isoformat()
+                                update_queue_entry(rid, status="SERVING", serving_at=ts)
+                                auto_update_now_serving(r)
+                                st.rerun()
+                        with sc2:
+                            if st.button("❌ Cancel", key=f"skip_no_{rid}", use_container_width=True):
+                                del st.session_state[f"skip_confirm_{rid}"]
+                                st.rerun()
 
                 # ── SERVING → Complete ──
                 elif status == "SERVING":
