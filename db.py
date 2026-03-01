@@ -369,7 +369,9 @@ def next_slot_num(queue_list):
 #  BQMS VALIDATION & SERIES
 # ═══════════════════════════════════════════════════
 def is_bqms_taken(queue_list, bqms_number, exclude_id=None):
-    """Check if BQMS# is already assigned today. Excludes terminal entries.
+    """Check if BQMS# is already assigned today.
+    A BQMS number is 'taken' once assigned, even if the entry is COMPLETED or VOID.
+    Only CANCELLED/EXPIRED entries release their BQMS (but they typically don't have one).
     exclude_id: skip this entry (for edit scenarios)."""
     if not bqms_number:
         return False
@@ -377,8 +379,8 @@ def is_bqms_taken(queue_list, bqms_number, exclude_id=None):
     for r in queue_list:
         if exclude_id and r.get("id") == exclude_id:
             continue
-        if r.get("status") in TERMINAL:
-            continue
+        # BQMS uniqueness: check ALL entries regardless of status
+        # (CANCELLED/EXPIRED rarely have BQMS assigned, so no practical impact)
         if (r.get("bqms_number") or "").strip().upper() == bn:
             return True
     return False
@@ -423,13 +425,12 @@ def suggest_next_bqms(queue_list, category, lane="regular"):
         rs = category.get("bqms_range_start")
         re_ = category.get("bqms_range_end")
 
-    # Find highest BQMS number assigned in this category+lane today
+    # Find highest BQMS number assigned in this category+lane today (ALL statuses)
     max_num = 0
     for r in queue_list:
         if r.get("category_id") != cat_id:
             continue
-        if r.get("status") in TERMINAL:
-            continue
+        # Include ALL entries — even COMPLETED/VOID — to avoid suggesting reused numbers
         # P3: only count entries in matching lane when priority_lane_enabled
         if category.get("priority_lane_enabled"):
             entry_lane = r.get("lane", "regular")
