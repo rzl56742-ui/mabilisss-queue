@@ -29,7 +29,6 @@ from db import (
     batch_assign_category, batch_assign_all, quick_checkin,
     get_batch_log_today, tier_sort_unassigned,
     swap_category_order, swap_service_order,
-    get_services_for_category,
     is_reservation_open, format_time_12h, get_logo, ICON_LIBRARY,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED,
     ROLES, ROLE_LABELS, ROLE_ICONS
@@ -421,15 +420,15 @@ elif tab == "queue":
                         qr_mobile_h = f'<br/><span style="font-size:11px;opacity:.5;">📱 {qr["mobile"]}</span>' if qr.get("mobile") else ""
 
                         st.markdown(f"""<div class="sss-card" style="border-left:4px solid {'#22c55e' if is_arrived else '#f59e0b'};">
-                            <span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{qr.get('res_num','')}</span>
-                            {pri_icon}<br/>
-                            <strong>{qr.get('cat_icon','')} {qr_dn}</strong><br/>
-                            <span style="font-size:12px;opacity:.6;">{qr.get('category','')} → {qr.get('service','')}</span>
-                            {qr_mobile_h}
-                            <br/><span style="font-size:11px;font-weight:700;color:{'#22c55e' if is_arrived else '#f59e0b'};">
-                            {STATUS_LABELS.get(qr_status, qr_status)}{arr_badge}</span>
-                            {f'<br/><span style="font-size:13px;font-weight:900;color:#22B8CF;">BQMS: {qr_bqms}</span>' if qr_bqms else ''}
-                        </div>""", unsafe_allow_html=True)
+<span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{qr.get('res_num','')}</span>
+{pri_icon}<br/>
+<strong>{qr.get('cat_icon','')} {qr_dn}</strong><br/>
+<span style="font-size:12px;opacity:.6;">{qr.get('category','')} → {qr.get('service','')}</span>
+{qr_mobile_h}
+<br/><span style="font-size:11px;font-weight:700;color:{'#22c55e' if is_arrived else '#f59e0b'};">
+{STATUS_LABELS.get(qr_status, qr_status)}{arr_badge}</span>
+{f'<br/><span style="font-size:13px;font-weight:900;color:#22B8CF;">BQMS: {qr_bqms}</span>' if qr_bqms else ''}
+</div>""", unsafe_allow_html=True)
 
                         if qr_status == "RESERVED" and not qr_bqms:
                             if st.button(f"✅ Confirm Arrival — {qr.get('res_num','')}",
@@ -574,8 +573,8 @@ elif tab == "queue":
 
                 w_svc = None
                 if w_cat:
-                    # Use grouped services (courtesy inherits from regular)
-                    svcs_for_cat = get_services_for_category(cats, w_cat)
+                    # P3.1: Direct service lookup by category_id
+                    svcs_for_cat = get_services(category_id=w_cat["id"])
                     svc_labels = ["-- None --"] + [
                         f"{s['label']}" + (f" — {s['description']}" if s.get("description") else "")
                         for s in svcs_for_cat]
@@ -833,18 +832,19 @@ elif tab == "queue":
             _mobile_h = f'<br/><span style="font-size:11px;opacity:.5;">📱 {r["mobile"]}</span>' if r.get("mobile") else ""
 
             st.markdown(f"""<div class="sss-card" style="border-left:4px solid {bdr};">
-                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                    <span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{r.get('res_num','')}</span>
-                    <span style="display:inline-block;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;
-                        background:rgba(51,153,204,.15);color:#3399CC;">
-                        {STATUS_LABELS.get(status, status)}</span>
-                    <span style="font-size:11px;opacity:.5;">{src}</span>{pri}{lane_badge}
-                    {bqms_h}
-                </div>
-                <strong>{r.get('cat_icon','')} {_dn}</strong><br/>
-                <span style="font-size:12px;opacity:.6;">{r.get('category','')} → {r.get('service','')}</span>
-                {_mobile_h}{void_note}
-            </div>""", unsafe_allow_html=True)
+<div style="display:flex;justify-content:space-between;">
+<div><span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{r.get('res_num','')}</span>
+<span style="font-size:11px;opacity:.5;margin-left:6px;">{src}</span>{pri}{lane_badge}<br/>
+<strong>{r.get('cat_icon','')} {_dn}</strong><br/>
+<span style="font-size:12px;opacity:.6;">{r.get('category','')} → {r.get('service','')}</span>
+{_mobile_h}{void_note}
+</div>
+<div style="text-align:right;">
+<span style="display:inline-block;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;
+background:rgba(51,153,204,.15);color:#3399CC;">
+{STATUS_LABELS.get(status, status)}</span>{bqms_h}
+</div>
+</div></div>""", unsafe_allow_html=True)
 
             # ── ACTION BUTTONS (only for queue operators) ──
             if can_edit_queue:
@@ -1048,17 +1048,17 @@ elif tab == "admin" and is_admin_role:
     atabs = st.tabs(["📋 Categories", "🔧 Sub-Categories",
                      "👥 Users", "🏢 Branch"])
 
-    # ══════════ CATEGORIES (Full CRUD + BQMS Series + Priority Lane) ══════════
+    # ══════════ CATEGORIES (Full CRUD + BQMS Series + Grouping) ══════════
     with atabs[0]:
         st.markdown("**Manage BQMS Categories**")
-        st.caption("Main transaction categories shown to members. Configure BQMS series, priority lanes, and descriptions.")
+        st.caption("Main transaction categories shown to members. Configure BQMS series, lane grouping, and descriptions.")
 
         for i, cat in enumerate(cats):
             rs = cat.get("bqms_range_start", "")
             re_ = cat.get("bqms_range_end", "")
             pfx = cat.get("bqms_prefix", "")
             range_txt = f" · Series: {pfx}{rs}–{pfx}{re_}" if rs and re_ else " · No series set"
-            # P3: Priority lane indicator
+            # P3.1: Priority lane indicator
             pri_lane_txt = " · ⭐PriLane" if cat.get("priority_lane_enabled") else ""
 
             with st.expander(f"{cat['icon']} {cat['label']} — Cap: {cat['cap']}{range_txt}{pri_lane_txt}"):

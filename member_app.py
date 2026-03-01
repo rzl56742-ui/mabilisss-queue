@@ -14,7 +14,7 @@ from db import (
     is_duplicate, count_ahead, cancel_entry, expire_old_reserved,
     validate_mobile_ph, gen_id, extract_bqms_num,
     count_arrived_in_category, count_reserved_position, calc_est_wait,
-    get_services_for_category,
+    get_services,
     is_reservation_open, format_time_12h, get_logo,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED
 )
@@ -211,7 +211,7 @@ if screen == "home":
     </div>""", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════
-#  SELECT CATEGORY — V2.3.0-P3.1: Flat category list
+#  SELECT CATEGORY — V2.3.0-P3.1: Direct category list
 # ═══════════════════════════════════════════════════
 elif screen == "select_cat":
     if st.button("← Back to Home"):
@@ -219,28 +219,28 @@ elif screen == "select_cat":
     st.subheader("Step 1: Choose Transaction")
 
     for cat in cats:
-        s = sc.get(cat["id"], {"remaining": cat.get("cap", 50), "cap": cat.get("cap", 50)})
-        full = s["remaining"] <= 0
+        cat_id = cat["id"]
+        s = sc.get(cat_id, {"remaining": cat.get("cap", 50), "cap": cat.get("cap", 50)})
+        remaining = s.get("remaining", 0)
+        full = remaining <= 0
 
         c1, c2 = st.columns([5, 1])
         with c1:
             btn_label = f"{cat['icon']} {cat['label']}"
-            if st.button(btn_label, key=f"cat_{cat['id']}", disabled=full, use_container_width=True):
-                st.session_state.sel_cat = cat["id"]
+            if st.button(btn_label, key=f"cat_{cat_id}", disabled=full, use_container_width=True):
+                st.session_state.sel_cat = cat_id
                 go("select_svc")
         with c2:
             if full:
                 st.markdown('<div style="text-align:center;"><span style="font-size:12px;font-weight:900;color:#ef4444;">FULL</span></div>', unsafe_allow_html=True)
             else:
-                st.markdown(f"<div style='text-align:center;'><span style='font-size:20px;font-weight:900;color:#3399CC;'>{s['remaining']}</span><br/><span style='font-size:10px;opacity:.5;'>left</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align:center;'><span style='font-size:20px;font-weight:900;color:#3399CC;'>{remaining}</span><br/><span style='font-size:10px;opacity:.5;'>left</span></div>", unsafe_allow_html=True)
 
+        # Show category description
         if cat.get("description"):
             st.caption(f"ℹ️ {cat['description']}")
 
-    all_full = all(
-        sc.get(c["id"], {}).get("remaining", 0) <= 0
-        for c in cats
-    )
+    all_full = all(sc.get(c["id"], {}).get("remaining", 0) <= 0 for c in cats)
     if all_full:
         open_t = format_time_12h(branch.get("reservation_open_time", "06:00") or "06:00")
         st.markdown(f"""<div class="sss-alert sss-alert-red" style="font-size:14px;">
@@ -250,7 +250,7 @@ elif screen == "select_cat":
         </div>""", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════
-#  SELECT SERVICE — V2.3.0-P3.1: Direct category lookup
+#  SELECT SERVICE — V2.3.0-P3.1: Direct service list
 # ═══════════════════════════════════════════════════
 elif screen == "select_svc":
     sel_cat_id = st.session_state.sel_cat
@@ -286,7 +286,8 @@ elif screen == "select_svc":
                 if cat.get("description"):
                     st.caption(f"ℹ️ {cat['description']}")
 
-                svcs_list = get_services_for_category(cats, cat)
+                # P3.1: Direct service lookup by category_id
+                svcs_list = get_services(category_id=cat["id"])
                 if not svcs_list:
                     st.info("No specific services configured. Please contact branch staff.")
                 for svc in svcs_list:
@@ -299,7 +300,7 @@ elif screen == "select_svc":
                         st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;ℹ️ {svc_desc}")
 
 # ═══════════════════════════════════════════════════
-#  MEMBER FORM — V2.3.0-P3.1: Simplified
+#  MEMBER FORM — V2.3.0-P3.1
 # ═══════════════════════════════════════════════════
 elif screen == "member_form":
     sel_cat_id = st.session_state.sel_cat
@@ -308,7 +309,8 @@ elif screen == "member_form":
         go("select_cat")
     else:
         cat = next((c for c in cats if c["id"] == sel_cat_id), None)
-        svcs_list = get_services_for_category(cats, cat) if cat else []
+        # P3.1: Direct service lookup
+        svcs_list = get_services(category_id=cat["id"]) if cat else []
         svc = next((s for s in svcs_list if s["id"] == sel_svc_id), None)
         if not cat or not svc:
             st.error("Selection not found. Please start over.")
@@ -334,7 +336,7 @@ elif screen == "member_form":
                 with fc2:
                     mobile = st.text_input("Mobile * (09XX XXX XXXX)", placeholder="09171234567")
 
-                # V2.3.0-P3: Per-category priority lane
+                # P3.1: Priority lane — shown when per-category priority is enabled
                 pri_value = "regular"
                 lane_value = "regular"
 
@@ -355,22 +357,8 @@ elif screen == "member_form":
                             and your queue position will be adjusted accordingly.
                         </div>""", unsafe_allow_html=True)
                 else:
-                    # No priority lane: check branch-level mode for guidance
-                    plm = branch.get("priority_lane_mode", "integrated")
-                    if plm == "integrated":
-                        pri = st.radio("Lane:", ["👤 Regular", "⭐ Priority (Senior/PWD/Pregnant)"], horizontal=True)
-                        if "Priority" in pri:
-                            pri_value = "priority"
-                            lane_value = "priority"
-                            st.markdown("""<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
-                                border-radius:8px;padding:10px 14px;margin:6px 0;font-size:12px;">
-                                ⚠️ <b>Priority Lane — Verification Required</b><br/><br/>
-                                Reserved for: 👴 <b>Senior Citizens</b> (60+) · ♿ <b>PWD</b> · 🤰 <b>Pregnant Women</b><br/><br/>
-                                📋 You will be asked to present <b>valid proof at the counter</b>.<br/><br/>
-                                ❌ <b>If you cannot present valid proof, you will be moved to the Regular Lane.</b>
-                            </div>""", unsafe_allow_html=True)
-                    else:
-                        st.caption("💡 Senior Citizens, PWD, and Pregnant Women: Please inform the guard at the branch for priority accommodation.")
+                    # No priority lane — inform about branch accommodation
+                    st.caption("💡 Senior Citizens, PWD, and Pregnant Women: Please inform the guard at the branch for priority accommodation.")
 
                 # Unified consent checkbox — combines data privacy + priority confirmation
                 if pri_value == "priority":
@@ -644,7 +632,7 @@ elif screen == "tracker":
                     ns_display = ns_val if ns_val else "—"
                     st.markdown(f'<div class="sss-metric"><div class="val" style="color:#22B8CF;">{ns_display}</div><div class="lbl">{ns_label}</div></div>', unsafe_allow_html=True)
                 with m2:
-                    st.markdown(f'<div class="sss-metric"><div class="val">{t["bqms_number"]}</div><div class="lbl">Your Number</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="sss-metric"><div class="val" style="color:#3399CC;">{t["bqms_number"]}</div><div class="lbl">Your Number</div></div>', unsafe_allow_html=True)
 
                 m3, m4 = st.columns(2)
                 with m3:
@@ -669,7 +657,7 @@ elif screen == "tracker":
                             est = ahead * avg
                             wt = f"~{est} min" if est < 60 else f"~{est // 60}h {est % 60}m"
                             wt_note = "estimate"
-                    st.markdown(f'<div class="sss-metric"><div class="val">{wt}</div><div class="lbl">Est. Wait</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="sss-metric"><div class="val" style="color:#3399CC;">{wt}</div><div class="lbl">Est. Wait</div></div>', unsafe_allow_html=True)
 
                 # V2.3.0: Wait time disclaimer + proactive guidance
                 if ahead == 0:
@@ -753,14 +741,16 @@ elif screen == "tracker":
                         st.markdown(f"""<div class="sss-alert sss-alert-yellow">
                             ⏳ <strong>Waiting for BQMS Number</strong><br/>
                             The branch is open. Please proceed to <b>{branch.get('name','')}</b> to get your queue number assigned.<br/>
-                            <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span>
+                            <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span><br/>
+                            <span style="font-size:12px;opacity:.7;">💡 Walk-in members who arrive early may be served first. Your slot is secured — no need to rush!</span>
                         </div>""", unsafe_allow_html=True)
                     else:
                         bt_display = format_time_12h(batch_time)
                         st.markdown(f"""<div class="sss-alert sss-alert-yellow">
                             ⏳ <strong>Waiting for BQMS Number</strong><br/>
                             Your queue number will be assigned starting at <b>{bt_display}</b> when the branch opens.<br/>
-                            <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span>
+                            <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span><br/>
+                            <span style="font-size:12px;opacity:.7;">💡 Walk-in members who arrive early may be served first. Your slot is secured — no need to rush!</span>
                         </div>""", unsafe_allow_html=True)
 
         # ── Action buttons ──
@@ -780,7 +770,7 @@ elif screen == "tracker":
             st.markdown(f"""<div class="sss-card" style="border-left:4px solid #ef4444;">
                 <strong>Need to cancel?</strong><br/>
                 <span style="font-size:13px;opacity:.7;">
-                Your slot will be released for other members. You may reserve again if slots are still available.</span>
+                Your slot will be released for other members. You may reserve again tomorrow.</span>
             </div>""", unsafe_allow_html=True)
 
             # Use session state for confirmation to avoid accidental cancels

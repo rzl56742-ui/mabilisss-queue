@@ -948,16 +948,6 @@ def update_password(user_id, new_password):
     reset_password(user_id, new_password)
 
 # ═══════════════════════════════════════════════════
-#  V2.3.0-P3 — SERVICE LOOKUP (simplified, no grouping)
-# ═══════════════════════════════════════════════════
-def get_services_for_category(cats, cat, all_services=None):
-    """Get services for a category. Straightforward lookup by category_id."""
-    if all_services is None:
-        all_services = get_services()
-    return [s for s in all_services if s.get("category_id") == cat["id"]]
-
-
-# ═══════════════════════════════════════════════════
 #  V2.3.0-P2 — REORDER HELPERS
 # ═══════════════════════════════════════════════════
 def swap_category_order(cat_id_a, cat_id_b):
