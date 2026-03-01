@@ -111,9 +111,6 @@ logo_url = get_logo(branch)
 st.markdown(f"""<div class="sss-header">
     <div style="display:flex;justify-content:space-between;align-items:center;">
         <div style="display:flex;align-items:center;gap:12px;">
-            <img src="{logo_url}" width="44" height="44"
-                 style="border-radius:8px;background:#fff;padding:2px;"
-                 onerror="this.style.display='none'"/>
             <div><h2>MabiliSSS Queue</h2>
                 <p>{branch.get('name','')} · {VER}</p></div>
         </div>
@@ -605,7 +602,6 @@ elif screen == "ticket":
             pri_badge = '<div style="margin:4px 0;"><span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(245,158,11,.15);color:#f59e0b;">⭐ PRIORITY LANE</span></div>'
 
         st.markdown(f"""<div class="sss-card" style="border-top:4px solid #3399CC;text-align:center;">
-<img src="{logo_url}" width="32" style="border-radius:6px;background:#fff;padding:2px;margin-bottom:4px;" onerror="this.style.display='none'">
 <div style="font-size:11px;opacity:.5;letter-spacing:2px;">MABILISSS QUEUE — {branch.get('name','').upper()}</div>
 <div style="font-weight:700;margin:4px 0;">{t['category']} — {t['service']}</div>
 {pri_badge}
@@ -728,9 +724,6 @@ elif screen == "tracker":
         # ── Entry card ──
         status_color = "#22B8CF" if has_bqms else "#3399CC"
         st.markdown(f"""<div class="sss-card" style="border-top:4px solid {status_color};text-align:center;">
-            <img src="{logo_url}" width="28"
-                 style="border-radius:6px;background:#fff;padding:2px;margin-bottom:4px;"
-                 onerror="this.style.display='none'"/>
             <div style="font-size:11px;opacity:.5;">{branch.get('name','').upper()}</div>
             <div style="font-weight:700;margin:4px 0;">{t.get('category','')} — {t.get('service','')}</div>
             <span style="display:inline-block;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;
@@ -790,9 +783,23 @@ elif screen == "tracker":
                             wt_note = "estimate"
                     st.markdown(f'<div class="sss-metric"><div class="val">{wt}</div><div class="lbl">Est. Wait</div></div>', unsafe_allow_html=True)
 
-                # V2.3.0: Wait time disclaimer
-                if ahead > 0:
-                    st.caption("⏱ Estimate based on today's average service speed. Actual wait may vary.")
+                # V2.3.0: Wait time disclaimer + proactive guidance
+                if ahead == 0:
+                    st.markdown('<div class="sss-alert sss-alert-green">🔔 <strong>Your number is next! Please stay near the counter.</strong></div>', unsafe_allow_html=True)
+                elif ahead <= 3:
+                    st.markdown(f'<div class="sss-alert sss-alert-yellow">⚠️ <strong>Your number is approaching!</strong> Only <b>{ahead}</b> ahead. Please proceed to the waiting area.</div>', unsafe_allow_html=True)
+                elif ahead > 3:
+                    # Compute estimated serving time for guidance
+                    avg = cat_obj.get("avg_time", 10) if cat_obj else 10
+                    est_min = round(ahead * avg * 0.75)
+                    est_max = round(ahead * avg * 1.35)
+                    if est_max >= 30:
+                        st.markdown(f"""<div class="sss-alert sss-alert-blue" style="font-size:13px;">
+                            💡 You have approximately <b>{est_min}–{est_max} minutes</b>.
+                            No need to wait at the branch — monitor this page and return when your number approaches.
+                        </div>""", unsafe_allow_html=True)
+                    else:
+                        st.caption("⏱ Estimate based on average service speed. Actual wait may vary.")
 
                 if not ns_val:
                     st.caption("💡 'Now Serving' updates automatically when staff processes entries.")
@@ -803,13 +810,24 @@ elif screen == "tracker":
 
                 cat_id = t.get("category_id", "")
                 cat_obj_pre = next((c for c in cats if c["id"] == cat_id), None)
+                cat_name = cat_obj_pre["label"] if cat_obj_pre else t.get("category", "")
                 entry_lane_pre = t.get("lane", "regular")
-                # P3: lane-specific counts when priority_lane_enabled
+                # Count at branch for this category
                 if cat_obj_pre and cat_obj_pre.get("priority_lane_enabled"):
                     at_branch = count_arrived_in_category(fresh, cat_id, lane=entry_lane_pre)
+                    lane_label = "Priority" if entry_lane_pre == "priority" else "Regular"
                 else:
                     at_branch = count_arrived_in_category(fresh, cat_id)
+                    lane_label = ""
                 my_pos = count_reserved_position(fresh, t)
+                # Count total online reservations in this category
+                total_online = len([e for e in fresh
+                                    if e.get("category_id") == cat_id
+                                    and e.get("status") == "RESERVED"
+                                    and not e.get("bqms_number")
+                                    and e.get("status") not in TERMINAL
+                                    and (not cat_obj_pre or not cat_obj_pre.get("priority_lane_enabled")
+                                         or e.get("lane", "regular") == entry_lane_pre)])
                 is_arrived = t.get("status") == "ARRIVED"
                 batch_time = branch.get("batch_assign_time", "08:00")
 
@@ -818,21 +836,22 @@ elif screen == "tracker":
                     st.markdown(f"""<div class="sss-alert sss-alert-green">
                         ✅ <strong>You're checked in!</strong><br/>
                         BQMS numbers will be assigned at <b>{batch_time} AM</b>.<br/>
-                        You are among <b>{at_branch} members</b> at the branch for this category.
+                        You are among <b>{at_branch} members</b> at the branch for <b>{cat_name}</b>.
                     </div>""", unsafe_allow_html=True)
                 else:
                     # Member reserved online, not yet at branch
                     m1, m2 = st.columns(2)
                     with m1:
                         at_color = "#f59e0b" if at_branch > 0 else "#22c55e"
-                        st.markdown(f'<div class="sss-metric"><div class="val" style="color:{at_color};">🏢 {at_branch}</div><div class="lbl">At Branch</div></div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="sss-metric"><div class="val" style="color:{at_color};">{at_branch}</div><div class="lbl">Members at Branch<br/><span style="font-size:10px;">for {cat_name}</span></div></div>', unsafe_allow_html=True)
                     with m2:
-                        st.markdown(f'<div class="sss-metric"><div class="val" style="color:#3399CC;">📱 #{my_pos}</div><div class="lbl">Online Pos</div></div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="sss-metric"><div class="val" style="color:#3399CC;">#{my_pos}</div><div class="lbl">Your Online Position<br/><span style="font-size:10px;">of {total_online} in {cat_name}</span></div></div>', unsafe_allow_html=True)
 
                     st.markdown(f"""<div class="sss-alert sss-alert-yellow">
                         ⏳ <strong>Waiting for BQMS Number</strong><br/>
                         Your queue number will be assigned at <b>{batch_time} AM</b> when the branch opens.<br/>
-                        <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos}</b> for this category. No need to rush — your slot is secured!</span>
+                        <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span><br/>
+                        <span style="font-size:12px;opacity:.7;">💡 Walk-in members who arrive early may be served first. Your slot is secured — no need to rush!</span>
                     </div>""", unsafe_allow_html=True)
 
         # ── Action buttons ──

@@ -26,7 +26,7 @@ from db import (
     validate_mobile_ph, extract_bqms_num,
     gen_id, hash_pw,
     batch_assign_category, batch_assign_all, quick_checkin,
-    get_batch_log_today,
+    get_batch_log_today, tier_sort_unassigned,
     swap_category_order, swap_service_order,
     get_category_groups, get_services_for_category,
     is_reservation_open, format_time_12h, get_logo, ICON_LIBRARY,
@@ -677,8 +677,39 @@ elif tab == "queue":
     ))
     filt = sorted_q
 
+    # Pre-compute tier-sorted order + position-aware suggested BQMS for UNASSIGNED view
+    tier_sorted = tier_sort_unassigned(queue, cats)
+    tier_entry_ids = [e[0]["id"] for e in tier_sorted]  # ordered list of IDs
+    tier_meta = {e[0]["id"]: (e[1], e[2], e[3]) for e in tier_sorted}  # {id: (tier_label, pos, cat)}
+
+    # Compute auto-incremented suggested BQMS per position per category/lane
+    suggested_map = {}  # {entry_id: suggested_bqms_str}
+    lane_counters = {}  # {(cat_id, lane): next_number}
+    for entry, tier_lbl, pos, cat_obj_s in tier_sorted:
+        eid = entry["id"]
+        entry_lane = entry.get("lane", "regular")
+        ck = (cat_obj_s["id"], entry_lane)
+        if ck not in lane_counters:
+            base = suggest_next_bqms(queue, cat_obj_s, lane=entry_lane)
+            try:
+                lane_counters[ck] = int(extract_bqms_num(base)) if base else None
+                suggested_map[eid] = base
+            except (ValueError, TypeError):
+                lane_counters[ck] = None
+                suggested_map[eid] = base or ""
+        else:
+            n = lane_counters[ck]
+            if n is not None:
+                prefix = cat_obj_s.get("bqms_prefix", "")
+                suggested_map[eid] = f"{prefix}{n}"
+            else:
+                suggested_map[eid] = ""
+        if lane_counters[ck] is not None:
+            lane_counters[ck] += 1
+
     if qf == "UNASSIGNED":
-        filt = [r for r in filt if not r.get("bqms_number") and r.get("status") not in TERMINAL]
+        # Use tier-sorted order
+        filt = [e[0] for e in tier_sorted]
     elif qf == "KIOSK":
         filt = [r for r in filt if r.get("source") == "KIOSK"]
     elif qf == "ONLINE":
@@ -702,7 +733,29 @@ elif tab == "queue":
         else:
             st.info("No entries match this filter.")
     else:
+        _last_tier = None
+        _last_cat = None
         for r in filt:
+            rid_check = r.get("id", "")
+            # Tier separator for UNASSIGNED view
+            if qf == "UNASSIGNED" and rid_check in tier_meta:
+                t_lbl, t_pos, t_cat = tier_meta[rid_check]
+                cat_label = t_cat.get("label", "")
+                # Category header
+                if t_cat.get("id") != _last_cat:
+                    _last_cat = t_cat.get("id")
+                    _last_tier = None
+                    st.markdown(f"<div style='font-size:14px;font-weight:800;margin-top:12px;padding:6px 10px;background:rgba(51,153,204,.08);border-radius:6px;'>{t_cat.get('icon','')} {cat_label}</div>", unsafe_allow_html=True)
+                # Tier sub-header
+                if t_lbl != _last_tier:
+                    _last_tier = t_lbl
+                    st.markdown(f"<div style='font-size:11px;font-weight:700;opacity:.6;margin:6px 0 2px 8px;'>── {t_lbl} ──</div>", unsafe_allow_html=True)
+                # Position badge
+                if t_pos == 1:
+                    st.markdown(f"<div style='font-size:12px;font-weight:800;color:#22c55e;margin-left:8px;'>⬆️ #{t_pos} — NEXT</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<div style='font-size:11px;opacity:.5;margin-left:8px;'>#{t_pos}</div>", unsafe_allow_html=True)
+
             status = r.get("status", "")
             needs_b = not r.get("bqms_number") and status not in TERMINAL
             bdr = "#ef4444" if needs_b else "rgba(128,128,128,.15)"
@@ -756,10 +809,10 @@ elif tab == "queue":
 
                 # ── NEEDS BQMS ASSIGNMENT ──
                 if needs_b:
-                    # P3: lane-aware BQMS suggestion and range
+                    # P3: lane-aware BQMS suggestion — use tier-sorted position-aware map
                     entry_lane = r.get("lane", "regular")
+                    suggested = suggested_map.get(rid, "")
                     if cat_obj and cat_obj.get("priority_lane_enabled"):
-                        suggested = suggest_next_bqms(queue, cat_obj, lane=entry_lane)
                         if entry_lane == "priority":
                             rs = cat_obj.get("priority_bqms_start")
                             re_ = cat_obj.get("priority_bqms_end")
@@ -767,7 +820,6 @@ elif tab == "queue":
                             rs = cat_obj.get("bqms_range_start")
                             re_ = cat_obj.get("bqms_range_end")
                     else:
-                        suggested = suggest_next_bqms(queue, cat_obj) if cat_obj else ""
                         rs = cat_obj.get("bqms_range_start") if cat_obj else None
                         re_ = cat_obj.get("bqms_range_end") if cat_obj else None
                     hint = f"Series: {rs}–{re_}" if rs and re_ else "e.g., 2005"
@@ -804,6 +856,7 @@ elif tab == "queue":
                                     ts = now_pht().isoformat()
                                     update_queue_entry(rid,
                                                        bqms_number=bv_clean,
+                                                       bqms_assigned_at=ts,
                                                        status="ARRIVED",
                                                        arrived_at=ts)
                                     st.rerun()

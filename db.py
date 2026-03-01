@@ -555,6 +555,63 @@ def count_ahead(queue_list, entry):
             count += 1
     return count
 
+
+
+def tier_sort_unassigned(queue_list, categories):
+    """Sort unassigned entries by 4-tier model, grouped by category.
+    Returns list of (entry, tier_label, position_in_cat, cat_obj) tuples.
+    Tier order: T1 Priority+ARRIVED, T2 Regular+ARRIVED,
+                T3 Priority+RESERVED, T4 Regular+RESERVED.
+    Within each tier: FCFS by arrived_at (T1/T2) or issued_at (T3/T4)."""
+    unassigned = [r for r in queue_list
+                  if not r.get("bqms_number")
+                  and r.get("status") not in TERMINAL]
+    if not unassigned:
+        return []
+
+    result = []
+
+    for cat in categories:
+        cat_id = cat["id"]
+        cat_entries = [e for e in unassigned if e.get("category_id") == cat_id]
+        if not cat_entries:
+            continue
+
+        def tier_key(e):
+            is_arrived = e.get("status") == "ARRIVED"
+            lane = e.get("lane", "regular")
+            is_pri = lane == "priority"
+            if is_arrived and is_pri:
+                tier = 0  # T1
+            elif is_arrived:
+                tier = 1  # T2
+            elif is_pri:
+                tier = 2  # T3
+            else:
+                tier = 3  # T4
+            ts = e.get("arrived_at", "") if is_arrived else e.get("issued_at", "9999")
+            return (tier, ts)
+
+        cat_entries.sort(key=tier_key)
+        tier_labels = {0: "\u2b50 Priority \u00b7 Arrived", 1: "\U0001f464 Regular \u00b7 Arrived",
+                       2: "\u2b50 Priority \u00b7 Reserved", 3: "\U0001f464 Regular \u00b7 Reserved"}
+
+        for pos, e in enumerate(cat_entries):
+            is_arrived = e.get("status") == "ARRIVED"
+            lane = e.get("lane", "regular")
+            is_pri = lane == "priority"
+            if is_arrived and is_pri:
+                tier = 0
+            elif is_arrived:
+                tier = 1
+            elif is_pri:
+                tier = 2
+            else:
+                tier = 3
+            result.append((e, tier_labels[tier], pos + 1, cat))
+
+    return result
+
 # ═══════════════════════════════════════════════════
 #  V2.3.0 — BATCH ASSIGN
 # ═══════════════════════════════════════════════════
@@ -634,7 +691,7 @@ def batch_assign_category(queue_list, category, assigned_by):
             first_bqms = bqms_str
         last_bqms = bqms_str
 
-        upd = {"bqms_number": bqms_str}
+        upd = {"bqms_number": bqms_str, "bqms_assigned_at": ts}
         # Promote RESERVED → ARRIVED
         if entry.get("status") == "RESERVED":
             upd["status"] = "ARRIVED"
