@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Member Portal V2.3.0-P3.1 (Public)
+ MabiliSSS Queue — Member Portal V2.3.0-P3.1.1 (Public)
  © RPTayo / SSS-MND 2026
 ═══════════════════════════════════════════════════════════
 """
@@ -702,7 +702,6 @@ elif screen == "tracker":
                                     if e.get("category_id") == cat_id
                                     and e.get("status") == "RESERVED"
                                     and not e.get("bqms_number")
-                                    and e.get("status") not in TERMINAL
                                     and (not cat_obj_pre or not cat_obj_pre.get("priority_lane_enabled")
                                          or e.get("lane", "regular") == entry_lane_pre)])
                 is_arrived = t.get("status") == "ARRIVED"

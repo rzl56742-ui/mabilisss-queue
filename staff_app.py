@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Staff Console V2.3.0-P3.1 (Protected)
+ MabiliSSS Queue — Staff Console V2.3.0-P3.1.1 (Protected)
  © RPTayo / SSS-MND 2026
 ═══════════════════════════════════════════════════════════
 """
@@ -1013,7 +1013,7 @@ background:rgba(51,153,204,.15);color:#3399CC;">
                                         st.error(f"BQMS {nb} already taken!")
                                     else:
                                         if cat_obj:
-                                            ok, msg = validate_bqms_range(nb, cat_obj)
+                                            ok, msg = validate_bqms_range(nb, cat_obj, lane=r.get("lane", "regular"))
                                             if not ok:
                                                 st.warning(f"⚠️ {msg}")
                                         update_queue_entry(rid,
@@ -1021,7 +1021,7 @@ background:rgba(51,153,204,.15);color:#3399CC;">
                                                            bqms_prev=r["bqms_number"])
                                         # Update Now Serving if this entry is being served
                                         if status == "SERVING":
-                                            update_bqms_state(r.get("category_id", ""), nb)
+                                            update_bqms_state(r.get("category_id", ""), nb, lane=r.get("lane", "regular"))
                                         st.session_state[f"edit_bqms_{rid}"] = False
                                         st.rerun()
                         with ec3:
@@ -1041,7 +1041,7 @@ background:rgba(51,153,204,.15);color:#3399CC;">
         st.rerun()
 
 # ═══════════════════════════════════════════════════
-#  ADMIN TAB (TH ONLY — SEC-01 fix)
+#  ADMIN TAB (TH + BH — P3.1.1 BH elevation)
 # ═══════════════════════════════════════════════════
 elif tab == "admin" and is_admin_role:
     st.subheader("👔 Admin Panel")
@@ -1191,10 +1191,24 @@ elif tab == "admin" and is_admin_role:
                 if has_active_entries(cat["id"]):
                     st.warning("⚠️ Cannot delete — active queue entries exist today.")
                 else:
-                    if st.button(f"🗑️ Delete {cat['label']}", key=f"del_{cat['id']}"):
-                        delete_category(cat["id"])
-                        st.success(f"✅ Deleted {cat['label']}")
-                        st.rerun()
+                    del_key = f"confirm_del_{cat['id']}"
+                    if st.session_state.get(del_key):
+                        st.warning(f"⚠️ Permanently delete **{cat['label']}** and all its sub-categories? This cannot be undone.")
+                        dc1, dc2 = st.columns(2)
+                        with dc1:
+                            if st.button(f"✅ Yes, Delete", key=f"ydel_{cat['id']}", type="primary", use_container_width=True):
+                                delete_category(cat["id"])
+                                st.session_state[del_key] = False
+                                st.success(f"✅ Deleted {cat['label']}")
+                                st.rerun()
+                        with dc2:
+                            if st.button("← Cancel", key=f"ndel_{cat['id']}", use_container_width=True):
+                                st.session_state[del_key] = False
+                                st.rerun()
+                    else:
+                        if st.button(f"🗑️ Delete {cat['label']}", key=f"del_{cat['id']}"):
+                            st.session_state[del_key] = True
+                            st.rerun()
 
         st.markdown("---")
         st.markdown("**➕ Add New Category**")
@@ -1316,10 +1330,17 @@ elif tab == "admin" and is_admin_role:
                     else:
                         st.write("")
                 with sc5:
-                    if st.button("🗑️", key=f"sd_{svc['id']}", help="Delete"):
-                        delete_service(svc["id"])
-                        st.toast("✅ Deleted!")
-                        st.rerun()
+                    sdel_key = f"confirm_sdel_{svc['id']}"
+                    if st.session_state.get(sdel_key):
+                        if st.button("✅ Sure?", key=f"ysd_{svc['id']}", help="Confirm delete", use_container_width=True):
+                            delete_service(svc["id"])
+                            st.session_state[sdel_key] = False
+                            st.toast("✅ Deleted!")
+                            st.rerun()
+                    else:
+                        if st.button("🗑️", key=f"sd_{svc['id']}", help="Delete"):
+                            st.session_state[sdel_key] = True
+                            st.rerun()
 
             with st.form(f"add_svc_{cat['id']}"):
                 ns1, ns2, ns3 = st.columns([3, 2, 1])
@@ -1387,20 +1408,48 @@ elif tab == "admin" and is_admin_role:
                                            key=f"rp_{u['id']}")
                 with rp2:
                     st.markdown("<div style='margin-top:6px;'></div>", unsafe_allow_html=True)
-                    if st.button("🔑 Reset", key=f"rpb_{u['id']}",
-                                 use_container_width=True):
-                        if not new_pw or len(new_pw) < 4:
-                            st.error("Min 4 characters.")
-                        else:
-                            reset_password(u["id"], new_pw)
-                            st.success(f"✅ Password reset for {u['display_name']}")
+                    rpconf_key = f"confirm_rp_{u['id']}"
+                    if st.session_state.get(rpconf_key):
+                        if st.button("✅ Confirm", key=f"yrpb_{u['id']}",
+                                     type="primary", use_container_width=True):
+                            pw_val = st.session_state.get(f"rp_pw_{u['id']}", "")
+                            if pw_val and len(pw_val) >= 4:
+                                reset_password(u["id"], pw_val)
+                                st.session_state[rpconf_key] = False
+                                st.success(f"✅ Password reset for {u['display_name']}")
+                            else:
+                                st.error("Min 4 characters.")
+                                st.session_state[rpconf_key] = False
+                    else:
+                        if st.button("🔑 Reset", key=f"rpb_{u['id']}",
+                                     use_container_width=True):
+                            if not new_pw or len(new_pw) < 4:
+                                st.error("Min 4 characters.")
+                            else:
+                                st.session_state[f"rp_pw_{u['id']}"] = new_pw
+                                st.session_state[rpconf_key] = True
+                                st.rerun()
 
                 # Delete — outside form, with confirmation
                 if u["id"] != user["id"]:  # Can't delete yourself
-                    if st.button(f"🗑️ Delete Account", key=f"du_{u['id']}"):
-                        delete_user(u["id"])
-                        st.success(f"✅ Deleted {u['display_name']}")
-                        st.rerun()
+                    udel_key = f"confirm_udel_{u['id']}"
+                    if st.session_state.get(udel_key):
+                        st.warning(f"⚠️ Permanently delete **{u['display_name']}** ({u['username']})? This cannot be undone.")
+                        udc1, udc2 = st.columns(2)
+                        with udc1:
+                            if st.button("✅ Yes, Delete", key=f"ydu_{u['id']}", type="primary", use_container_width=True):
+                                delete_user(u["id"])
+                                st.session_state[udel_key] = False
+                                st.success(f"✅ Deleted {u['display_name']}")
+                                st.rerun()
+                        with udc2:
+                            if st.button("← Cancel", key=f"ndu_{u['id']}", use_container_width=True):
+                                st.session_state[udel_key] = False
+                                st.rerun()
+                    else:
+                        if st.button(f"🗑️ Delete Account", key=f"du_{u['id']}"):
+                            st.session_state[udel_key] = True
+                            st.rerun()
 
         st.markdown("---")
         st.markdown("**➕ Add New Staff User**")
@@ -1663,7 +1712,7 @@ elif tab == "dash" and role in ("th", "staff", "bh", "dh"):
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["Date", "Res#", "Source", "Last", "First", "Category", "Service",
-                "Status", "BQMS#", "BQMS_Prev", "Mobile", "Priority",
+                "Status", "Lane", "BQMS#", "BQMS_Prev", "BQMS_Assigned_At", "Mobile", "Priority",
                 "Issued", "Arrived", "Serving_At", "Completed", "Cancelled_At",
                 "Void_Reason", "Voided_By", "Voided_At", "Expired_At"])
     for r in dash_q:
@@ -1671,7 +1720,8 @@ elif tab == "dash" and role in ("th", "staff", "bh", "dh"):
             r.get("queue_date", ""), r.get("res_num", ""), r.get("source", ""),
             r.get("last_name", ""), r.get("first_name", ""),
             r.get("category", ""), r.get("service", ""),
-            r.get("status", ""), r.get("bqms_number", ""), r.get("bqms_prev", ""),
+            r.get("status", ""), r.get("lane", "regular"),
+            r.get("bqms_number", ""), r.get("bqms_prev", ""), r.get("bqms_assigned_at", ""),
             r.get("mobile", ""), r.get("priority", ""),
             r.get("issued_at", ""), r.get("arrived_at", ""), r.get("serving_at", ""),
             r.get("completed_at", ""),

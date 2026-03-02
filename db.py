@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Database Layer V2.3.0-P3.1 (Supabase)
+ MabiliSSS Queue — Database Layer V2.3.0-P3.1.1 (Supabase)
  Shared by member_app.py and staff_app.py
  All times in PHT (UTC+8)
  © RPTayo / SSS-MND 2026
