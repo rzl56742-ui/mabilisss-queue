@@ -204,9 +204,9 @@ if screen == "home":
         <strong>📌 Paano Gamitin / How It Works</strong><br/><br/>
         <b>Step 1:</b> Tap <b>"Reserve a Slot"</b> → choose your transaction → fill in your name and mobile number.<br/><br/>
         <b>Step 2:</b> Save your <b>Reservation Number</b> (ex: R-0215-001).<br/><br/>
-        <b>Step 3:</b> Go to <b>{branch.get('name','')}</b> during office hours. Show your reservation to the guard.<br/><br/>
-        <b>Step 4:</b> Staff will assign your official <b>BQMS queue number</b>.<br/><br/>
-        <b>Step 5:</b> Tap <b>"Track My Queue"</b> anytime to check your position and estimated wait time!<br/><br/>
+        <b>Step 3:</b> <b>Wait for your official BQMS queue number</b> — the branch will assign it starting when the branch opens. Tap <b>"Track My Queue"</b> to check.<br/><br/>
+        <b>Step 4:</b> Once you have your BQMS number, <b>monitor your position</b> and <b>be at the SSS Branch when your number is called.</b><br/><br/>
+        <b>⚠️ Important:</b> If you are not present when your number is called, you will need to queue again, subject to slot availability.<br/><br/>
         <b>📱 Need to cancel?</b> Tap "Track My Queue" → find your entry → tap <b>Cancel</b>. Your slot will be released for other members.
     </div>""", unsafe_allow_html=True)
 
@@ -478,9 +478,9 @@ elif screen == "ticket":
         st.markdown(f"""<div class="sss-card" style="border-left:4px solid #0066A1;">
             <strong>📋 What to Do Next:</strong><br/><br/>
             <b>1.</b> Save your Reservation Number: <code style="font-size:16px;font-weight:900;">{t['res_num']}</code><br/>
-            <b>2.</b> Go to <strong>{branch.get('name','')}</strong> during office hours ({branch.get('hours','Mon-Fri, 8AM-5PM')}).<br/>
-            <b>3.</b> Show your reservation to the guard → you'll get your <strong>official BQMS queue number</strong>.<br/>
-            <b>4.</b> Tap <strong>"Track My Queue"</strong> anytime to check your position!<br/>
+            <b>2.</b> <strong>Wait for your official BQMS queue number</strong> — the branch will assign it starting when the branch opens. Tap <strong>"Track My Queue"</strong> to check.<br/>
+            <b>3.</b> Once you have your BQMS number, <strong>monitor your position</strong> and <strong>be at the SSS Branch when your number is called.</strong><br/>
+            <b>4.</b> ⚠️ If you are not present when your number is called, you will need to queue again, subject to slot availability.<br/>
             <b>5.</b> Need to cancel? Track your queue and tap <strong>Cancel</strong>.
         </div>""", unsafe_allow_html=True)
 
@@ -671,8 +671,9 @@ elif screen == "tracker":
                     est_max = round(ahead * avg * 1.35)
                     if est_max >= 30:
                         st.markdown(f"""<div class="sss-alert sss-alert-blue" style="font-size:13px;">
-                            💡 You have approximately <b>{est_min}–{est_max} minutes</b>.
-                            No need to wait at the branch — monitor this page and return when your number approaches.
+                            💡 You have approximately <b>{est_min}–{est_max} minutes</b> before your turn.
+                            Monitor this page and <b>be at the branch when your number is approaching.</b><br/>
+                            <span style="font-size:11px;color:#ef4444;">⚠️ If you are not present when called, you will need to queue again, subject to slot availability.</span>
                         </div>""", unsafe_allow_html=True)
                     else:
                         st.caption("⏱ Estimate based on average service speed. Actual wait may vary.")
@@ -740,9 +741,10 @@ elif screen == "tracker":
                     if batch_passed:
                         st.markdown(f"""<div class="sss-alert sss-alert-yellow">
                             ⏳ <strong>Waiting for BQMS Number</strong><br/>
-                            The branch is open. Please proceed to <b>{branch.get('name','')}</b> to get your queue number assigned.<br/>
+                            The branch is open and will assign your official queue number shortly.<br/>
                             <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span><br/>
-                            <span style="font-size:12px;opacity:.7;">💡 Walk-in members who arrive early may be served first. Your slot is secured — no need to rush!</span>
+                            <span style="font-size:12px;opacity:.8;">📱 Your BQMS number will appear here automatically — just tap <b>Refresh</b> to check.</span><br/>
+                            <span style="font-size:12px;color:#ef4444;">⚠️ Once assigned, <b>be at the SSS Branch when your number is called.</b> If not present, you will need to queue again, subject to slot availability.</span>
                         </div>""", unsafe_allow_html=True)
                     else:
                         bt_display = format_time_12h(batch_time)
@@ -750,7 +752,8 @@ elif screen == "tracker":
                             ⏳ <strong>Waiting for BQMS Number</strong><br/>
                             Your queue number will be assigned starting at <b>{bt_display}</b> when the branch opens.<br/>
                             <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span><br/>
-                            <span style="font-size:12px;opacity:.7;">💡 Walk-in members who arrive early may be served first. Your slot is secured — no need to rush!</span>
+                            <span style="font-size:12px;opacity:.8;">📱 Your BQMS number will appear here automatically — just tap <b>Refresh</b> to check.</span><br/>
+                            <span style="font-size:12px;color:#ef4444;">⚠️ Once assigned, <b>be at the SSS Branch when your number is called.</b> If not present, you will need to queue again, subject to slot availability.</span>
                         </div>""", unsafe_allow_html=True)
 
         # ── Action buttons ──
