@@ -123,10 +123,10 @@ if session_age_hrs > 8:
     st.rerun()
 user = st.session_state.auth_user
 role = user["role"]
-is_th = role == "th"
-is_admin_role = role in ("th",)  # Only TH gets admin — SEC-01 fix
-is_ro = role in ("bh", "dh")  # Read-only observers
-can_edit_queue = role in ("kiosk", "staff", "th")  # Can operate queue
+is_th = role in ("th", "bh")  # TH and BH have same capabilities
+is_admin_role = role in ("th", "bh")  # TH + BH get admin panel
+is_ro = role in ("dh",)  # Only DH is read-only observer
+can_edit_queue = role in ("kiosk", "staff", "th", "bh")  # Can operate queue
 
 # ── Auto-expire old entries on load ──
 if "staff_expired_run" not in st.session_state:
