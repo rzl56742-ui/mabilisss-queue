@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Staff Console V2.3.0-P3.1.1 (Protected)
+ MabiliSSS Queue — Staff Console V2.3.0-P3.2 (Protected)
  © RPTayo / SSS-MND 2026
 ═══════════════════════════════════════════════════════════
 """
@@ -31,7 +31,11 @@ from db import (
     swap_category_order, swap_service_order,
     is_reservation_open, format_time_12h, get_logo, ICON_LIBRARY,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED,
-    ROLES, ROLE_LABELS, ROLE_ICONS
+    ROLES, ROLE_LABELS, ROLE_ICONS,
+    # P3.2: Time-slot appointment system
+    generate_time_windows, get_online_ceiling, online_slots_remaining,
+    get_window_availability, get_current_window, get_entries_by_window,
+    count_online_in_category,
 )
 
 st.set_page_config(page_title="MabiliSSS Staff", page_icon="🔐", layout="centered")
@@ -556,6 +560,55 @@ elif tab == "queue":
                         st.session_state[f"confirm_{all_key}"] = True
                         st.rerun()
 
+            # P3.2: Window-aware grouping when time slots enabled
+            if branch.get("time_slot_enabled") and total_unassigned > 0:
+                st.markdown("---")
+                st.markdown("**🕐 Appointment Window View**")
+                cur_win = get_current_window(branch)
+                windows = generate_time_windows(branch)
+                _interval = int(branch.get("slot_interval_minutes", 30) or 30)
+
+                for w in windows:
+                    # Count unassigned entries for this window
+                    w_entries = [e for e in queue
+                                 if e.get("preferred_time_slot") == w
+                                 and not e.get("bqms_number")
+                                 and e.get("status") in ("RESERVED", "ARRIVED")]
+                    w_cnt = len(w_entries)
+                    # End time
+                    try:
+                        _wh, _wm = map(int, w.split(":"))
+                        _we = _wh * 60 + _wm + _interval
+                        _weh, _wem = divmod(_we, 60)
+                        w_end = f"{_weh:02d}:{_wem:02d}"
+                    except (ValueError, TypeError):
+                        w_end = w
+
+                    is_current = (w == cur_win)
+                    highlight = "border-left:4px solid #22B8CF;background:rgba(34,184,207,.05);" if is_current else ""
+                    current_tag = " ← NOW" if is_current else ""
+
+                    if w_cnt > 0:
+                        st.markdown(f'<div class="sss-card" style="{highlight}padding:8px 12px;">'
+                                    f'<strong>🕐 {format_time_12h(w)} – {format_time_12h(w_end)}{current_tag}</strong> · '
+                                    f'<span style="color:#3399CC;font-weight:700;">{w_cnt} pending</span></div>',
+                                    unsafe_allow_html=True)
+                    elif is_current:
+                        st.markdown(f'<div class="sss-card" style="{highlight}padding:8px 12px;opacity:.6;">'
+                                    f'<strong>🕐 {format_time_12h(w)} – {format_time_12h(w_end)}{current_tag}</strong> · 0 pending</div>',
+                                    unsafe_allow_html=True)
+
+                # Also show entries with no time slot (e.g., walk-ins or pre-P3.2 entries)
+                no_ts = [e for e in queue
+                         if not e.get("preferred_time_slot")
+                         and not e.get("bqms_number")
+                         and e.get("status") in ("RESERVED", "ARRIVED")
+                         and e.get("source") == "ONLINE"]
+                if no_ts:
+                    st.markdown(f'<div class="sss-card" style="padding:8px 12px;opacity:.7;">'
+                                f'<strong>📋 No time preference</strong> · {len(no_ts)} pending (pre-appointment entries)</div>',
+                                unsafe_allow_html=True)
+
     # ── Walk-in Registration ──
     if can_edit_queue:
         with st.expander("➕ Add Walk-in"):
@@ -685,6 +738,7 @@ elif tab == "queue":
                             "source": "KIOSK",
                             "issued_at": ts,
                             "arrived_at": ts if bv_check else None,
+                            "preferred_time_slot": None,  # P3.2: Walk-ins bypass time slots
                         }
                         insert_queue_entry(entry)
                         st.success(f"✅ **{rn}** registered! Share this with the member.")
@@ -805,6 +859,11 @@ elif tab == "queue":
                     lane_badge = '<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(245,158,11,.15);color:#f59e0b;margin-left:4px;">⭐PRI</span>'
                 else:
                     lane_badge = '<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(34,197,94,.1);color:#22c55e;margin-left:4px;">👤REG</span>'
+            # P3.2: Time slot badge
+            ts_badge_staff = ""
+            _rts = r.get("preferred_time_slot")
+            if _rts:
+                ts_badge_staff = f'<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(34,184,207,.15);color:#22B8CF;margin-left:4px;">🕐{format_time_12h(_rts)}</span>'
             bqms_h = ""
             if r.get("bqms_number"):
                 # Range check indicator — P3: lane-aware
@@ -834,7 +893,7 @@ elif tab == "queue":
             st.markdown(f"""<div class="sss-card" style="border-left:4px solid {bdr};">
 <div style="display:flex;justify-content:space-between;">
 <div><span style="font-family:monospace;font-size:15px;font-weight:800;color:#3399CC;">{r.get('res_num','')}</span>
-<span style="font-size:11px;opacity:.5;margin-left:6px;">{src}</span>{pri}{lane_badge}<br/>
+<span style="font-size:11px;opacity:.5;margin-left:6px;">{src}</span>{pri}{lane_badge}{ts_badge_staff}<br/>
 <strong>{r.get('cat_icon','')} {_dn}</strong><br/>
 <span style="font-size:12px;opacity:.6;">{r.get('category','')} → {r.get('service','')}</span>
 {_mobile_h}{void_note}
@@ -1620,6 +1679,89 @@ elif tab == "admin" and is_admin_role:
 
         st.markdown("---")
 
+        # ── P3.2: Time Slot & Appointment Settings ──
+        st.markdown("**🕐 Time Slot & Appointment Settings**")
+        st.caption("When enabled, online reservations require members to select an appointment time window. Walk-ins are unaffected.")
+
+        ts_on = branch.get("time_slot_enabled", False)
+        ts_label = "🕐 **TIME SLOTS: ON** — Members select appointment windows" if ts_on else "Time slots are OFF — members reserve without time preference"
+        st.markdown(ts_label)
+
+        if ts_on:
+            if st.button("⏹️ Turn OFF Time Slots", key="ts_off_btn", type="secondary", use_container_width=True):
+                update_branch(time_slot_enabled=False)
+                st.success("✅ Time slots disabled. Members reserve without time preference.")
+                st.rerun()
+
+            st.markdown("---")
+            with st.form("ts_config"):
+                st.markdown("**⏰ Appointment Windows**")
+
+                tsc1, tsc2 = st.columns(2)
+                with tsc1:
+                    cur_first = branch.get("first_appointment_time", "08:00") or "08:00"
+                    new_first = st.text_input("First Window (HH:MM, 24h)", value=cur_first,
+                                              help="First bookable appointment window. Default: 08:00")
+                with tsc2:
+                    cur_last = branch.get("last_appointment_time", "15:00") or "15:00"
+                    new_last = st.text_input("Last Window (HH:MM, 24h)", value=cur_last,
+                                             help="Last bookable window. Default: 15:00")
+
+                cur_interval = int(branch.get("slot_interval_minutes", 30) or 30)
+                new_interval = st.selectbox("Window Interval", [30, 60],
+                                            index=0 if cur_interval == 30 else 1,
+                                            format_func=lambda x: f"{x} minutes")
+
+                # Preview windows
+                import re as re_mod
+                _valid_times = True
+                for tv, tn in [(new_first, "First"), (new_last, "Last")]:
+                    if not re_mod.match(r'^\d{2}:\d{2}$', tv.strip()):
+                        st.error(f"{tn} window must be HH:MM format.")
+                        _valid_times = False
+                if _valid_times:
+                    try:
+                        _fh, _fm = map(int, new_first.strip().split(":"))
+                        _lh, _lm = map(int, new_last.strip().split(":"))
+                        _n_wins = 0
+                        _cur_m = _fh * 60 + _fm
+                        _end_m = _lh * 60 + _lm
+                        while _cur_m <= _end_m:
+                            _n_wins += 1
+                            _cur_m += new_interval
+                        st.info(f"Preview: **{_n_wins} windows** from {format_time_12h(new_first.strip())} to {format_time_12h(new_last.strip())} ({new_interval}-min intervals)")
+                    except (ValueError, TypeError):
+                        pass
+
+                st.markdown("**🚶 Walk-in Floor %**")
+                st.caption("Minimum % of each category's daily cap reserved for walk-ins. Online reservations cannot exceed (100% - floor%). Walk-ins can always absorb unused online slots.")
+                cur_floor = int(branch.get("walk_in_floor_pct", 40) or 40)
+                new_floor = st.slider("Walk-in Floor %", min_value=10, max_value=80, value=cur_floor, step=5,
+                                      help="40% = 40% of cap reserved for walk-ins, 60% available for online")
+
+                # Show impact preview
+                st.caption(f"Example: If a category has cap=50 → Online ceiling: {max(1, int(50 * (100 - new_floor) / 100))} · Walk-in guaranteed: {int(50 * new_floor / 100)}")
+
+                if st.form_submit_button("💾 Save Time Slot Settings", type="primary"):
+                    if not _valid_times:
+                        st.error("Fix time format errors above.")
+                    else:
+                        update_branch(
+                            first_appointment_time=new_first.strip(),
+                            last_appointment_time=new_last.strip(),
+                            slot_interval_minutes=new_interval,
+                            walk_in_floor_pct=new_floor,
+                        )
+                        st.success("✅ Time slot settings saved!")
+                        st.rerun()
+        else:
+            if st.button("🕐 Turn ON Time Slots", key="ts_on_btn", type="primary", use_container_width=True):
+                update_branch(time_slot_enabled=True)
+                st.success("✅ Time slots enabled! Configure windows below.")
+                st.rerun()
+
+        st.markdown("---")
+
         # ── Test Mode ──
         st.markdown("**🧪 Test / Mock Mode**")
         st.caption("When ON, bypasses reservation time + day restrictions. Use for testing outside operating hours.")
@@ -1712,7 +1854,8 @@ elif tab == "dash" and role in ("th", "staff", "bh", "dh"):
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["Date", "Res#", "Source", "Last", "First", "Category", "Service",
-                "Status", "Lane", "BQMS#", "BQMS_Prev", "BQMS_Assigned_At", "Mobile", "Priority",
+                "Status", "Lane", "BQMS#", "BQMS_Prev", "BQMS_Assigned_At", "Preferred_Time_Slot",
+                "Mobile", "Priority",
                 "Issued", "Arrived", "Serving_At", "Completed", "Cancelled_At",
                 "Void_Reason", "Voided_By", "Voided_At", "Expired_At"])
     for r in dash_q:
@@ -1722,6 +1865,7 @@ elif tab == "dash" and role in ("th", "staff", "bh", "dh"):
             r.get("category", ""), r.get("service", ""),
             r.get("status", ""), r.get("lane", "regular"),
             r.get("bqms_number", ""), r.get("bqms_prev", ""), r.get("bqms_assigned_at", ""),
+            r.get("preferred_time_slot", ""),
             r.get("mobile", ""), r.get("priority", ""),
             r.get("issued_at", ""), r.get("arrived_at", ""), r.get("serving_at", ""),
             r.get("completed_at", ""),

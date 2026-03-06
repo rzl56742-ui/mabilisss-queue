@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Member Portal V2.3.0-P3.1.1 (Public)
+ MabiliSSS Queue — Member Portal V2.3.0-P3.2 (Public)
  © RPTayo / SSS-MND 2026
 ═══════════════════════════════════════════════════════════
 """
@@ -16,7 +16,10 @@ from db import (
     count_arrived_in_category, count_reserved_position, calc_est_wait,
     get_services,
     is_reservation_open, format_time_12h, get_logo,
-    OSTATUS, STATUS_LABELS, TERMINAL, FREED
+    OSTATUS, STATUS_LABELS, TERMINAL, FREED,
+    # P3.2: Time-slot appointment system
+    generate_time_windows, get_online_ceiling, online_slots_remaining,
+    get_window_availability,
 )
 
 st.set_page_config(page_title="MabiliSSS Queue", page_icon="🏛️", layout="centered")
@@ -54,7 +57,7 @@ except ImportError:
 
 # ── Session state ──
 for k, v in {"screen": "home", "sel_cat": None,
-             "sel_svc": None, "ticket": None, "tracked_id": None}.items():
+             "sel_svc": None, "sel_timeslot": None, "ticket": None, "tracked_id": None}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -218,10 +221,20 @@ elif screen == "select_cat":
         go("home")
     st.subheader("Step 1: Choose Transaction")
 
+    ts_enabled = branch.get("time_slot_enabled", False)
+
     for cat in cats:
         cat_id = cat["id"]
         s = sc.get(cat_id, {"remaining": cat.get("cap", 50), "cap": cat.get("cap", 50)})
         remaining = s.get("remaining", 0)
+
+        # P3.2: When time slots ON, online reservations are capped at online ceiling
+        online_rem = None
+        if ts_enabled:
+            online_rem = online_slots_remaining(queue, cat, branch)
+            if online_rem is not None:
+                remaining = min(remaining, online_rem)
+
         full = remaining <= 0
 
         c1, c2 = st.columns([5, 1])
@@ -295,9 +308,91 @@ elif screen == "select_svc":
                     btn_text = f"● {svc['label']}"
                     if st.button(btn_text, key=f"svc_{svc['id']}", use_container_width=True):
                         st.session_state.sel_svc = svc["id"]
-                        go("member_form")
+                        # P3.2: Route to time slot selection if enabled
+                        if branch.get("time_slot_enabled"):
+                            go("select_timeslot")
+                        else:
+                            go("member_form")
                     if svc_desc:
                         st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;ℹ️ {svc_desc}")
+
+# ═══════════════════════════════════════════════════
+#  P3.2: SELECT TIME SLOT
+# ═══════════════════════════════════════════════════
+elif screen == "select_timeslot":
+    sel_cat_id = st.session_state.sel_cat
+    sel_svc_id = st.session_state.sel_svc
+    if not sel_cat_id or not sel_svc_id:
+        go("select_cat")
+    else:
+        cat = next((c for c in cats if c["id"] == sel_cat_id), None)
+        svcs_list = get_services(category_id=cat["id"]) if cat else []
+        svc = next((s for s in svcs_list if s["id"] == sel_svc_id), None)
+        if not cat or not svc:
+            st.error("Selection not found.")
+            if st.button("← Start Over"):
+                go("select_cat")
+        else:
+            if st.button("← Back"):
+                go("select_svc")
+
+            st.subheader("Step 3: Choose Appointment Time")
+            st.markdown(f'<div class="sss-card">{cat["icon"]} <strong>{svc["label"]}</strong><br/><span style="opacity:.6;">{cat["label"]}</span></div>', unsafe_allow_html=True)
+            st.caption("Select your preferred time window. Please arrive at the branch within your chosen time slot.")
+
+            # P3.2: Get per-window availability
+            fresh_q = get_queue_today()
+            windows = get_window_availability(fresh_q, cat, branch)
+
+            if not windows:
+                st.warning("No appointment windows configured. Please contact the branch.")
+                if st.button("← Back to Home"):
+                    go("home")
+            else:
+                # "📌 Earliest Available" shortcut
+                first_open = next((w for w in windows if w["available"] > 0), None)
+                if first_open:
+                    ea_label = f"📌 Earliest Available — {format_time_12h(first_open['window'])} to {format_time_12h(first_open['window_end'])}"
+                    if st.button(ea_label, key="ts_earliest", type="primary", use_container_width=True):
+                        st.session_state.sel_timeslot = first_open["window"]
+                        go("member_form")
+                    st.markdown("---")
+
+                # All windows
+                now = now_pht()
+                now_min = now.hour * 60 + now.minute
+                for w in windows:
+                    try:
+                        wh, wm = map(int, w["window"].split(":"))
+                        eh, em = map(int, w["window_end"].split(":"))
+                        w_start_min = wh * 60 + wm
+                        w_end_min = eh * 60 + em
+                    except (ValueError, TypeError):
+                        w_start_min = 0
+                        w_end_min = 0
+
+                    # Skip past windows (unless test mode)
+                    is_past = now_min >= w_end_min and not branch.get("test_mode")
+                    is_full = w["available"] <= 0
+                    disabled = is_past or is_full
+
+                    w_label = f"🕐 {format_time_12h(w['window'])} – {format_time_12h(w['window_end'])}"
+
+                    tc1, tc2 = st.columns([5, 1])
+                    with tc1:
+                        if st.button(w_label, key=f"ts_{w['window']}", disabled=disabled, use_container_width=True):
+                            st.session_state.sel_timeslot = w["window"]
+                            go("member_form")
+                    with tc2:
+                        if is_past:
+                            st.markdown('<div style="text-align:center;"><span style="font-size:11px;opacity:.4;">Past</span></div>', unsafe_allow_html=True)
+                        elif is_full:
+                            st.markdown('<div style="text-align:center;"><span style="font-size:12px;font-weight:900;color:#ef4444;">FULL</span></div>', unsafe_allow_html=True)
+                        else:
+                            st.markdown(f"<div style='text-align:center;'><span style='font-size:20px;font-weight:900;color:#3399CC;'>{w['available']}</span><br/><span style='font-size:10px;opacity:.5;'>left</span></div>", unsafe_allow_html=True)
+
+                if not first_open:
+                    st.error("All appointment windows are full for today. Please try the next working day.")
 
 # ═══════════════════════════════════════════════════
 #  MEMBER FORM — V2.3.0-P3.1
@@ -318,9 +413,22 @@ elif screen == "member_form":
                 go("select_cat")
         else:
             if st.button("← Back"):
-                go("select_svc")
+                # P3.2: Back to timeslot when enabled, otherwise services
+                if branch.get("time_slot_enabled"):
+                    go("select_timeslot")
+                else:
+                    go("select_svc")
 
-            st.subheader("Step 3: Your Details")
+            _step_num = "4" if branch.get("time_slot_enabled") else "3"
+            st.subheader(f"Step {_step_num}: Your Details")
+
+            # P3.2: Show selected time slot if applicable
+            _sel_ts = st.session_state.get("sel_timeslot")
+            if branch.get("time_slot_enabled") and _sel_ts:
+                _ts_end_min = int(_sel_ts.split(":")[0]) * 60 + int(_sel_ts.split(":")[1]) + int(branch.get("slot_interval_minutes", 30) or 30)
+                _teh, _tem = divmod(_ts_end_min, 60)
+                _ts_end = f"{_teh:02d}:{_tem:02d}"
+                st.markdown(f'<div class="sss-card" style="border-left:4px solid #22B8CF;">🕐 <strong>Appointment Window:</strong> {format_time_12h(_sel_ts)} – {format_time_12h(_ts_end)}</div>', unsafe_allow_html=True)
 
             st.markdown(f'<div class="sss-card">{cat["icon"]} <strong>{svc["label"]}</strong><br/><span style="opacity:.6;">{cat["label"]}</span></div>', unsafe_allow_html=True)
 
@@ -435,6 +543,8 @@ elif screen == "member_form":
                             "bqms_number": None,
                             "source": "ONLINE",
                             "issued_at": ts,
+                            # P3.2: Time slot appointment
+                            "preferred_time_slot": st.session_state.get("sel_timeslot") if branch.get("time_slot_enabled") else None,
                         }
                         insert_queue_entry(entry)
                         st.session_state.ticket = entry
@@ -454,6 +564,20 @@ elif screen == "ticket":
         if t.get("lane") == "priority":
             pri_badge = '<div style="margin:4px 0;"><span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(245,158,11,.15);color:#f59e0b;">⭐ PRIORITY LANE</span></div>'
 
+        # P3.2: Time slot badge
+        ts_badge = ""
+        _pts = t.get("preferred_time_slot")
+        if _pts:
+            _interval = int(branch.get("slot_interval_minutes", 30) or 30)
+            try:
+                _ph, _pm = map(int, _pts.split(":"))
+                _em = _ph * 60 + _pm + _interval
+                _eeh, _eem = divmod(_em, 60)
+                _ts_disp = f"{format_time_12h(_pts)} – {format_time_12h(f'{_eeh:02d}:{_eem:02d}')}"
+            except (ValueError, TypeError):
+                _ts_disp = _pts
+            ts_badge = f'<div style="margin:4px 0;"><span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(34,184,207,.15);color:#22B8CF;">🕐 {_ts_disp}</span></div>'
+
         # Pre-compute display name and mobile for ticket
         if t.get("last_name"):
             _tdn = f"{t['last_name']}, {t['first_name']} {t.get('mi', '')}".strip()
@@ -467,6 +591,7 @@ elif screen == "ticket":
 <div style="font-size:11px;opacity:.5;letter-spacing:2px;">MABILISSS QUEUE — {branch.get('name','').upper()}</div>
 <div style="font-weight:700;margin:4px 0;">{t['category']} — {t['service']}</div>
 {pri_badge}
+{ts_badge}
 <div style="border-top:1px dashed rgba(128,128,128,.2);margin:8px 0;"></div>
 <div style="font-size:11px;opacity:.5;">RESERVATION NUMBER</div>
 <div class="sss-resnum">{t['res_num']}</div>
@@ -475,13 +600,21 @@ elif screen == "ticket":
 {_tmob}
 </div>""", unsafe_allow_html=True)
 
+        # P3.2: Time-slot aware instructions
+        _ts_note = ""
+        if t.get("preferred_time_slot"):
+            _ts_note = f'<b>2.</b> 🕐 <strong>Your appointment window is {ts_badge.strip()}</strong>. Please plan to arrive at the branch within this time.<br/>'
+            _step_offset = 1
+        else:
+            _step_offset = 0
+
         st.markdown(f"""<div class="sss-card" style="border-left:4px solid #0066A1;">
             <strong>📋 What to Do Next:</strong><br/><br/>
             <b>1.</b> Save your Reservation Number: <code style="font-size:16px;font-weight:900;">{t['res_num']}</code><br/>
-            <b>2.</b> <strong>Wait for your official BQMS queue number</strong> — the branch will assign it starting when the branch opens. Tap <strong>"Track My Queue"</strong> to check.<br/>
-            <b>3.</b> Once you have your BQMS number, <strong>monitor your position</strong> and <strong>be at the SSS Branch when your number is called.</strong><br/>
-            <b>4.</b> ⚠️ If you are not present when your number is called, you will need to queue again, subject to slot availability.<br/>
-            <b>5.</b> Need to cancel? Track your queue and tap <strong>Cancel</strong>.
+            {_ts_note}<b>{2 + _step_offset}.</b> <strong>Wait for your official BQMS queue number</strong> — the branch will assign it starting when the branch opens. Tap <strong>"Track My Queue"</strong> to check.<br/>
+            <b>{3 + _step_offset}.</b> Once you have your BQMS number, <strong>monitor your position</strong> and <strong>be at the SSS Branch when your number is called.</strong><br/>
+            <b>{4 + _step_offset}.</b> ⚠️ If you are not present when your number is called, you will need to queue again, subject to slot availability.<br/>
+            <b>{5 + _step_offset}.</b> Need to cancel? Track your queue and tap <strong>Cancel</strong>.
         </div>""", unsafe_allow_html=True)
 
         c1, c2 = st.columns(2)
@@ -599,12 +732,25 @@ elif screen == "tracker":
 
         # ── Entry card ──
         status_color = "#22B8CF" if has_bqms else "#3399CC"
+        # P3.2: Time slot badge for tracker
+        _trk_ts = t.get("preferred_time_slot")
+        _trk_ts_html = ""
+        if _trk_ts:
+            _ti = int(branch.get("slot_interval_minutes", 30) or 30)
+            try:
+                _th, _tm = map(int, _trk_ts.split(":"))
+                _te = _th * 60 + _tm + _ti
+                _teh2, _tem2 = divmod(_te, 60)
+                _trk_ts_html = f'<div style="margin:4px 0;"><span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(34,184,207,.15);color:#22B8CF;">🕐 {format_time_12h(_trk_ts)} – {format_time_12h(f"{_teh2:02d}:{_tem2:02d}")}</span></div>'
+            except (ValueError, TypeError):
+                _trk_ts_html = ""
         st.markdown(f"""<div class="sss-card" style="border-top:4px solid {status_color};text-align:center;">
             <div style="font-size:11px;opacity:.5;">{branch.get('name','').upper()}</div>
             <div style="font-weight:700;margin:4px 0;">{t.get('category','')} — {t.get('service','')}</div>
             <span style="display:inline-block;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;
                 background:rgba(51,153,204,.15);color:#3399CC;">
                 {STATUS_LABELS.get(status, status)}</span>
+            {_trk_ts_html}
         </div>""", unsafe_allow_html=True)
 
         # ── BQMS and queue position ──

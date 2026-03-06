@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════
- MabiliSSS Queue — Database Layer V2.3.0-P3.1.1 (Supabase)
+ MabiliSSS Queue — Database Layer V2.3.0-P3.2 (Supabase)
  Shared by member_app.py and staff_app.py
  All times in PHT (UTC+8)
  © RPTayo / SSS-MND 2026
@@ -1033,6 +1033,140 @@ def format_time_12h(time_str):
         return f"{h12}:{m:02d} {suffix}"
     except (ValueError, AttributeError):
         return time_str
+
+
+# ═══════════════════════════════════════════════════
+#  P3.2: TIME-SLOT APPOINTMENT SYSTEM
+# ═══════════════════════════════════════════════════
+
+def generate_time_windows(branch):
+    """Generate appointment windows from branch settings.
+    Returns list of HH:MM start-time strings. Empty if disabled."""
+    if not branch.get("time_slot_enabled"):
+        return []
+    first = branch.get("first_appointment_time", "08:00") or "08:00"
+    last = branch.get("last_appointment_time", "15:00") or "15:00"
+    interval = int(branch.get("slot_interval_minutes", 30) or 30)
+    try:
+        fh, fm = map(int, first.split(":"))
+        lh, lm = map(int, last.split(":"))
+    except (ValueError, TypeError):
+        return []
+    windows = []
+    cur = fh * 60 + fm
+    end = lh * 60 + lm
+    while cur <= end:
+        h, m = divmod(cur, 60)
+        windows.append(f"{h:02d}:{m:02d}")
+        cur += interval
+    return windows
+
+
+def get_online_ceiling(cat, branch, lane=None):
+    """Max online reservations for a category (or lane) today.
+    Online ceiling = lane_cap × (100 − walk_in_floor_pct) / 100.
+    When time_slot_enabled is OFF, returns full cap (P3.1.1 behavior)."""
+    if lane == "priority" and cat.get("priority_lane_enabled"):
+        raw_cap = cat.get("priority_cap", 10) or 10
+    else:
+        raw_cap = cat.get("cap", 50)
+    if not branch.get("time_slot_enabled"):
+        return raw_cap
+    floor_pct = int(branch.get("walk_in_floor_pct", 40) or 40)
+    return max(1, int(raw_cap * (100 - floor_pct) / 100))
+
+
+def count_online_in_category(queue_list, cat_id, lane=None, time_slot=None):
+    """Count active ONLINE entries for a category, optionally by lane and window."""
+    n = 0
+    for r in queue_list:
+        if r.get("category_id") != cat_id:
+            continue
+        if r.get("source") != "ONLINE":
+            continue
+        if r.get("status") in ("CANCELLED", "VOID", "EXPIRED"):
+            continue
+        if lane and r.get("lane", "regular") != lane:
+            continue
+        if time_slot and r.get("preferred_time_slot") != time_slot:
+            continue
+        n += 1
+    return n
+
+
+def online_slots_remaining(queue_list, cat, branch, lane=None):
+    """Total online slots remaining for a category today.
+    Returns None when time_slot_enabled is OFF (caller uses existing cap logic)."""
+    if not branch.get("time_slot_enabled"):
+        return None
+    ceiling = get_online_ceiling(cat, branch, lane=lane)
+    booked = count_online_in_category(queue_list, cat["id"], lane=lane)
+    return max(0, ceiling - booked)
+
+
+def get_window_availability(queue_list, cat, branch, lane=None):
+    """Per-window slot availability for member portal.
+    Returns list of {window, window_end, slots, booked, available}.
+    Empty when disabled."""
+    if not branch.get("time_slot_enabled"):
+        return []
+    windows = generate_time_windows(branch)
+    if not windows:
+        return []
+    ceiling = get_online_ceiling(cat, branch, lane=lane)
+    n_win = len(windows)
+    base = ceiling // n_win
+    rem = ceiling % n_win
+    interval = int(branch.get("slot_interval_minutes", 30) or 30)
+    result = []
+    for i, w in enumerate(windows):
+        slots = base + (1 if i < rem else 0)
+        booked = count_online_in_category(queue_list, cat["id"], lane=lane, time_slot=w)
+        try:
+            wh, wm = map(int, w.split(":"))
+            end_min = wh * 60 + wm + interval
+            eh, em = divmod(end_min, 60)
+            w_end = f"{eh:02d}:{em:02d}"
+        except (ValueError, TypeError):
+            w_end = w
+        result.append({
+            "window": w, "window_end": w_end,
+            "slots": slots, "booked": booked,
+            "available": max(0, slots - booked),
+        })
+    return result
+
+
+def get_current_window(branch):
+    """Returns the current appointment window start time (HH:MM) or None."""
+    windows = generate_time_windows(branch)
+    if not windows:
+        return None
+    now = now_pht()
+    now_min = now.hour * 60 + now.minute
+    current = None
+    for w in windows:
+        try:
+            wh, wm = map(int, w.split(":"))
+            if now_min >= wh * 60 + wm:
+                current = w
+        except (ValueError, TypeError):
+            continue
+    return current
+
+
+def get_entries_by_window(queue_list, cat_id, time_slot, status_filter=None):
+    """Get queue entries for a specific category + time window."""
+    results = []
+    for r in queue_list:
+        if r.get("category_id") != cat_id:
+            continue
+        if r.get("preferred_time_slot") != time_slot:
+            continue
+        if status_filter and r.get("status") not in status_filter:
+            continue
+        results.append(r)
+    return results
 
 
 # ═══════════════════════════════════════════════════
