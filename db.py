@@ -657,7 +657,7 @@ def tier_sort_unassigned(queue_list, categories):
 # ═══════════════════════════════════════════════════
 #  V2.3.0 — BATCH ASSIGN
 # ═══════════════════════════════════════════════════
-def batch_assign_category(queue_list, category, assigned_by):
+def batch_assign_category(queue_list, category, assigned_by, branch=None):
     """Batch-assign BQMS# to all unassigned entries in a category.
     Sort order (4-tier):
       1. ARRIVED + priority  → arrived_at ASC
@@ -665,6 +665,8 @@ def batch_assign_category(queue_list, category, assigned_by):
       3. RESERVED + priority → issued_at ASC
       4. RESERVED + regular  → issued_at ASC
     P3: When priority_lane_enabled, assigns BQMS# from lane-specific ranges.
+    P3.2: When branch provided and time_slot_enabled, only assigns entries
+          whose preferred_time_slot is current/past (window-gated).
     Returns (count_assigned, first_bqms, last_bqms) or (0, None, None)."""
     cat_id = category["id"]
     prefix = category.get("bqms_prefix", "") or ""
@@ -675,6 +677,10 @@ def batch_assign_category(queue_list, category, assigned_by):
             if e.get("category_id") == cat_id
             and not e.get("bqms_number")
             and e.get("status") not in TERMINAL]
+
+    # P3.2: Window-gate filter — only assign due entries
+    pool = filter_due_for_assignment(pool, branch)
+
     if not pool:
         return 0, None, None
 
@@ -746,13 +752,14 @@ def batch_assign_category(queue_list, category, assigned_by):
     return len(ordered), first_bqms, last_bqms
 
 
-def batch_assign_all(queue_list, categories, assigned_by):
-    """Batch-assign all categories at once. Returns dict {cat_id: (count, first, last)}."""
+def batch_assign_all(queue_list, categories, assigned_by, branch=None):
+    """Batch-assign all categories at once. Returns dict {cat_id: (count, first, last)}.
+    P3.2: Passes branch for window-gated assignment."""
     results = {}
     # Must re-read queue after each category to get correct next BQMS
     for cat in categories:
         fresh_q = get_queue_today()
-        cnt, first, last = batch_assign_category(fresh_q, cat, assigned_by)
+        cnt, first, last = batch_assign_category(fresh_q, cat, assigned_by, branch=branch)
         if cnt > 0:
             results[cat["id"]] = (cnt, first, last)
     return results
@@ -1167,6 +1174,57 @@ def get_entries_by_window(queue_list, cat_id, time_slot, status_filter=None):
             continue
         results.append(r)
     return results
+
+
+def filter_due_for_assignment(pool, branch):
+    """P3.2: Window-gate filter. Returns only entries whose preferred_time_slot
+    is current/past, OR has no time slot (walk-ins, legacy entries).
+    When time_slot_enabled is OFF, returns pool unchanged."""
+    if not branch or not branch.get("time_slot_enabled"):
+        return pool
+    cur_win = get_current_window(branch)
+    if not cur_win:
+        # Before first window — only allow entries with no time slot
+        return [e for e in pool if not e.get("preferred_time_slot")]
+    # Current window as minutes for comparison
+    try:
+        ch, cm = map(int, cur_win.split(":"))
+        cur_min = ch * 60 + cm
+    except (ValueError, TypeError):
+        return pool
+    interval = int(branch.get("slot_interval_minutes", 30) or 30)
+    cur_end = cur_min + interval
+    due = []
+    for e in pool:
+        ts = e.get("preferred_time_slot")
+        if not ts:
+            # No time slot (walk-in, legacy) — always due
+            due.append(e)
+            continue
+        try:
+            th, tm = map(int, ts.split(":"))
+            e_min = th * 60 + tm
+        except (ValueError, TypeError):
+            due.append(e)
+            continue
+        # Entry is due if its window start <= current window end
+        if e_min <= cur_min:
+            due.append(e)
+    return due
+
+
+def count_due_for_assignment(queue_list, cat_id, branch):
+    """P3.2: Count entries eligible for batch assign (window-gated).
+    Returns (due_count, total_unassigned_count)."""
+    pool = [e for e in queue_list
+            if e.get("category_id") == cat_id
+            and not e.get("bqms_number")
+            and e.get("status") not in TERMINAL]
+    total = len(pool)
+    if not branch or not branch.get("time_slot_enabled"):
+        return total, total
+    due = filter_due_for_assignment(pool, branch)
+    return len(due), total
 
 
 # ═══════════════════════════════════════════════════

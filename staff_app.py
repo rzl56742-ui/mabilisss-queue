@@ -34,6 +34,7 @@ from db import (
     ROLES, ROLE_LABELS, ROLE_ICONS,
     # P3.2: Time-slot appointment system
     generate_time_windows, get_current_window,
+    filter_due_for_assignment, count_due_for_assignment,
 )
 
 st.set_page_config(page_title="MabiliSSS Staff", page_icon="🔐", layout="centered")
@@ -453,7 +454,10 @@ elif tab == "queue":
         assigned_cats = {bl["category_id"] for bl in batch_logs}
 
         # Count unassigned per category
+        # P3.2: Also count "due" (window-gated) vs total when time slots ON
+        ts_on = branch.get("time_slot_enabled", False)
         unassigned_by_cat = {}
+        due_by_cat = {}
         for cat in cats:
             cid = cat["id"]
             cnt = len([e for e in queue
@@ -462,12 +466,24 @@ elif tab == "queue":
                        and e.get("status") not in TERMINAL])
             if cnt > 0:
                 unassigned_by_cat[cid] = cnt
+            if ts_on:
+                due, _ = count_due_for_assignment(queue, cid, branch)
+                if due > 0:
+                    due_by_cat[cid] = due
 
         total_unassigned = sum(unassigned_by_cat.values())
+        total_due = sum(due_by_cat.values()) if ts_on else total_unassigned
 
-        with st.expander(f"🎫 Batch Assign BQMS ({total_unassigned} pending · cutoff {batch_time_str})"):
-            st.caption("Assign BQMS# to all checked-in and reserved members at once. "
-                       "Priority: ⭐ Arrived → Regular Arrived → ⭐ Reserved → Regular Reserved.")
+        _exp_label = (f"🎫 Batch Assign BQMS ({total_due} due of {total_unassigned} pending · cutoff {batch_time_str})"
+                      if ts_on and total_due != total_unassigned
+                      else f"🎫 Batch Assign BQMS ({total_unassigned} pending · cutoff {batch_time_str})")
+
+        with st.expander(_exp_label):
+            _cap_text = ("Assign BQMS# to all checked-in and reserved members at once. "
+                         "Priority: ⭐ Arrived → Regular Arrived → ⭐ Reserved → Regular Reserved.")
+            if ts_on:
+                _cap_text += " 🕐 Time slots ON — only current/past window members are eligible."
+            st.caption(_cap_text)
 
             # Guard cap display per category
             st.markdown("**📊 Queue Status per Category**")
@@ -499,6 +515,7 @@ elif tab == "queue":
                 cid = cat["id"]
                 was_assigned = cid in assigned_cats
                 cnt = unassigned_by_cat.get(cid, 0)
+                due_cnt = due_by_cat.get(cid, 0) if ts_on else cnt
                 key_base = f"batch_{cid}"
 
                 if was_assigned:
@@ -507,16 +524,23 @@ elif tab == "queue":
                 elif cnt == 0:
                     st.button(f"{cat['icon']} {cat.get('short_label','')} — 0 pending",
                               key=key_base, disabled=True, use_container_width=True)
+                elif ts_on and due_cnt == 0:
+                    # Has pending but none are due yet (all future windows)
+                    st.button(f"🕐 {cat['icon']} {cat.get('short_label','')} — {cnt} waiting (future windows)",
+                              key=key_base, disabled=True, use_container_width=True)
                 else:
+                    # P3.2: Show due vs total when they differ
+                    _btn_cnt = f"{due_cnt} due of {cnt}" if ts_on and due_cnt != cnt else str(cnt)
                     # Confirmation flow
                     if st.session_state.get(f"confirm_{key_base}"):
-                        st.warning(f"⚠️ Assign BQMS# to **{cnt} members** in {cat['label']}?")
+                        st.warning(f"⚠️ Assign BQMS# to **{due_cnt} members** in {cat['label']}?"
+                                   + (f" ({cnt - due_cnt} in future windows will wait.)" if ts_on and due_cnt != cnt else ""))
                         bc1, bc2 = st.columns(2)
                         with bc1:
                             if st.button(f"✅ Yes, Assign", key=f"y_{key_base}",
                                          type="primary", use_container_width=True):
                                 fresh_q = get_queue_today()
-                                n, first, last = batch_assign_category(fresh_q, cat, user["display_name"])
+                                n, first, last = batch_assign_category(fresh_q, cat, user["display_name"], branch=branch)
                                 st.session_state[f"confirm_{key_base}"] = False
                                 if n > 0:
                                     st.success(f"✅ Assigned {n} BQMS# ({first}–{last}) for {cat['label']}!")
@@ -527,22 +551,31 @@ elif tab == "queue":
                                 st.session_state[f"confirm_{key_base}"] = False
                                 st.rerun()
                     else:
-                        if st.button(f"🎫 {cat['icon']} {cat.get('short_label','')} — {cnt} pending",
+                        if st.button(f"🎫 {cat['icon']} {cat.get('short_label','')} — {_btn_cnt} pending",
                                      key=key_base, use_container_width=True):
                             st.session_state[f"confirm_{key_base}"] = True
                             st.rerun()
 
             # Batch Assign ALL button
-            if total_unassigned > 0 and len(assigned_cats) < len(cats):
+            # P3.2: When time slots ON, use due count and pass branch
+            _all_eligible = total_due if ts_on else total_unassigned
+            if _all_eligible > 0 and len(assigned_cats) < len(cats):
                 st.markdown("---")
                 all_key = "batch_all"
+                _all_label = (f"🎫 Assign All Due Windows ({total_due} due of {total_unassigned})"
+                              if ts_on and total_due != total_unassigned
+                              else f"🎫 Batch Assign ALL Categories ({total_unassigned} pending)")
+                _all_warn = (f"⚠️ Assign BQMS# to **{total_due} due members** across all categories?"
+                             + (f" ({total_unassigned - total_due} in future windows will wait.)" if ts_on and total_due != total_unassigned else "")
+                             if ts_on
+                             else f"⚠️ Assign BQMS# to **ALL {total_unassigned} pending members** across all categories?")
                 if st.session_state.get(f"confirm_{all_key}"):
-                    st.warning(f"⚠️ Assign BQMS# to **ALL {total_unassigned} pending members** across all categories?")
+                    st.warning(_all_warn)
                     ba1, ba2 = st.columns(2)
                     with ba1:
                         if st.button("✅ Yes, Assign All", key=f"y_{all_key}",
                                      type="primary", use_container_width=True):
-                            results = batch_assign_all(queue, cats, user["display_name"])
+                            results = batch_assign_all(queue, cats, user["display_name"], branch=branch)
                             st.session_state[f"confirm_{all_key}"] = False
                             total_done = sum(r[0] for r in results.values())
                             st.success(f"✅ Batch assigned {total_done} BQMS# across {len(results)} categories!")
@@ -553,10 +586,12 @@ elif tab == "queue":
                             st.session_state[f"confirm_{all_key}"] = False
                             st.rerun()
                 else:
-                    if st.button(f"🎫 Batch Assign ALL Categories ({total_unassigned} pending)",
-                                 key=all_key, type="primary", use_container_width=True):
+                    if st.button(_all_label, key=all_key, type="primary", use_container_width=True):
                         st.session_state[f"confirm_{all_key}"] = True
                         st.rerun()
+            elif ts_on and total_unassigned > 0 and total_due == 0:
+                st.markdown("---")
+                st.info(f"🕐 {total_unassigned} members pending but all in future windows. BQMS will be assigned when their window arrives.")
 
             # P3.2: Window-aware grouping when time slots enabled
             if branch.get("time_slot_enabled") and total_unassigned > 0:
@@ -565,6 +600,15 @@ elif tab == "queue":
                 cur_win = get_current_window(branch)
                 windows = generate_time_windows(branch)
                 _interval = int(branch.get("slot_interval_minutes", 30) or 30)
+
+                # Determine current window as minutes for comparison
+                _cur_min = 0
+                if cur_win:
+                    try:
+                        _cwh, _cwm = map(int, cur_win.split(":"))
+                        _cur_min = _cwh * 60 + _cwm
+                    except (ValueError, TypeError):
+                        _cur_min = 0
 
                 for w in windows:
                     # Count unassigned entries for this window
@@ -579,18 +623,52 @@ elif tab == "queue":
                         _we = _wh * 60 + _wm + _interval
                         _weh, _wem = divmod(_we, 60)
                         w_end = f"{_weh:02d}:{_wem:02d}"
+                        w_start_min = _wh * 60 + _wm
                     except (ValueError, TypeError):
                         w_end = w
+                        w_start_min = 0
 
                     is_current = (w == cur_win)
+                    is_due = cur_win and w_start_min <= _cur_min  # Past or current
+                    is_future = not is_due
                     highlight = "border-left:4px solid #22B8CF;background:rgba(34,184,207,.05);" if is_current else ""
                     current_tag = " ← NOW" if is_current else ""
 
                     if w_cnt > 0:
+                        status_color = "#3399CC" if is_due else "#9ca3af"
+                        status_label = f'<span style="color:{status_color};font-weight:700;">{w_cnt} pending</span>'
+                        if is_future:
+                            status_label += ' <span style="font-size:11px;opacity:.5;">(future)</span>'
                         st.markdown(f'<div class="sss-card" style="{highlight}padding:8px 12px;">'
                                     f'<strong>🕐 {format_time_12h(w)} – {format_time_12h(w_end)}{current_tag}</strong> · '
-                                    f'<span style="color:#3399CC;font-weight:700;">{w_cnt} pending</span></div>',
+                                    f'{status_label}</div>',
                                     unsafe_allow_html=True)
+                        # P3.2: Per-window assign button (only for due windows)
+                        if is_due:
+                            _wkey = f"win_assign_{w}"
+                            if st.session_state.get(f"confirm_{_wkey}"):
+                                st.warning(f"⚠️ Assign BQMS# to **{w_cnt} members** in {format_time_12h(w)}–{format_time_12h(w_end)} window?")
+                                _wc1, _wc2 = st.columns(2)
+                                with _wc1:
+                                    if st.button("✅ Yes", key=f"y_{_wkey}", type="primary", use_container_width=True):
+                                        # Assign only this window's entries across all categories
+                                        _w_done = 0
+                                        for _wcat in cats:
+                                            fresh_q = get_queue_today()
+                                            n, _wf, _wl = batch_assign_category(fresh_q, _wcat, user["display_name"], branch=branch)
+                                            _w_done += n
+                                        st.session_state[f"confirm_{_wkey}"] = False
+                                        if _w_done > 0:
+                                            st.success(f"✅ Assigned {_w_done} BQMS# for {format_time_12h(w)} window!")
+                                        st.rerun()
+                                with _wc2:
+                                    if st.button("← Cancel", key=f"n_{_wkey}", use_container_width=True):
+                                        st.session_state[f"confirm_{_wkey}"] = False
+                                        st.rerun()
+                            else:
+                                if st.button(f"🎫 Assign {format_time_12h(w)} window ({w_cnt})", key=_wkey, use_container_width=True):
+                                    st.session_state[f"confirm_{_wkey}"] = True
+                                    st.rerun()
                     elif is_current:
                         st.markdown(f'<div class="sss-card" style="{highlight}padding:8px 12px;opacity:.6;">'
                                     f'<strong>🕐 {format_time_12h(w)} – {format_time_12h(w_end)}{current_tag}</strong> · 0 pending</div>',
@@ -604,7 +682,7 @@ elif tab == "queue":
                          and e.get("source") == "ONLINE"]
                 if no_ts:
                     st.markdown(f'<div class="sss-card" style="padding:8px 12px;opacity:.7;">'
-                                f'<strong>📋 No time preference</strong> · {len(no_ts)} pending (pre-appointment entries)</div>',
+                                f'<strong>📋 No time preference</strong> · {len(no_ts)} pending (always eligible)</div>',
                                 unsafe_allow_html=True)
 
     # ── Walk-in Registration ──
