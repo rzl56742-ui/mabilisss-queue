@@ -279,10 +279,8 @@ elif screen == "select_svc":
             if st.button("← Back"):
                 go("select_cat")
 
-            # Re-check cap with fresh data
-            fresh_q = get_queue_today()
-            fsc = slot_counts(cats, fresh_q)
-            s = fsc.get(cat["id"], {"remaining": 0, "cap": cat.get("cap", 50)})
+            # Re-check cap with loaded data (sc pre-computed by load_queue_data)
+            s = sc.get(cat["id"], {"remaining": 0, "cap": cat.get("cap", 50)})
 
             if s["remaining"] <= 0:
                 open_t = format_time_12h(branch.get("reservation_open_time", "06:00") or "06:00")
@@ -340,9 +338,8 @@ elif screen == "select_timeslot":
             st.markdown(f'<div class="sss-card">{cat["icon"]} <strong>{svc["label"]}</strong><br/><span style="opacity:.6;">{cat["label"]}</span></div>', unsafe_allow_html=True)
             st.caption("Select your preferred time window. Please arrive at the branch within your chosen time slot.")
 
-            # P3.2: Get per-window availability
-            fresh_q = get_queue_today()
-            windows = get_window_availability(fresh_q, cat, branch)
+            # P3.2: Get per-window availability (queue pre-loaded by load_queue_data)
+            windows = get_window_availability(queue, cat, branch)
 
             if not windows:
                 st.warning("No appointment windows configured. Please contact the branch.")
@@ -702,8 +699,8 @@ elif screen == "track_input":
 # ═══════════════════════════════════════════════════
 elif screen == "tracker":
     tid = st.session_state.tracked_id
-    fresh = get_queue_today()
-    fbq = get_bqms_state()
+    fresh = queue  # Already loaded by load_queue_data() — no redundant DB call
+    fbq = bqms     # Already loaded by load_bqms_data() — no redundant DB call
     t = next((r for r in fresh if r.get("id") == tid), None)
 
     if not t:

@@ -617,6 +617,10 @@ elif tab == "queue":
                                  and not e.get("bqms_number")
                                  and e.get("status") in ("RESERVED", "ARRIVED")]
                     w_cnt = len(w_entries)
+                    # P3.2: Count already-assigned entries for "done" marker
+                    w_assigned = len([e for e in queue
+                                      if e.get("preferred_time_slot") == w
+                                      and e.get("bqms_number")])
                     # End time
                     try:
                         _wh, _wm = map(int, w.split(":"))
@@ -636,7 +640,8 @@ elif tab == "queue":
 
                     if w_cnt > 0:
                         status_color = "#3399CC" if is_due else "#9ca3af"
-                        status_label = f'<span style="color:{status_color};font-weight:700;">{w_cnt} pending</span>'
+                        _assigned_note = f' · <span style="font-size:11px;color:#22c55e;">✅ {w_assigned} assigned</span>' if w_assigned > 0 else ""
+                        status_label = f'<span style="color:{status_color};font-weight:700;">{w_cnt} pending</span>{_assigned_note}'
                         if is_future:
                             status_label += ' <span style="font-size:11px;opacity:.5;">(future)</span>'
                         st.markdown(f'<div class="sss-card" style="{highlight}padding:8px 12px;">'
@@ -655,7 +660,7 @@ elif tab == "queue":
                                         _w_done = 0
                                         for _wcat in cats:
                                             fresh_q = get_queue_today()
-                                            n, _wf, _wl = batch_assign_category(fresh_q, _wcat, user["display_name"], branch=branch)
+                                            n, _wf, _wl = batch_assign_category(fresh_q, _wcat, user["display_name"], branch=branch, target_window=w)
                                             _w_done += n
                                         st.session_state[f"confirm_{_wkey}"] = False
                                         if _w_done > 0:
@@ -669,6 +674,12 @@ elif tab == "queue":
                                 if st.button(f"🎫 Assign {format_time_12h(w)} window ({w_cnt})", key=_wkey, use_container_width=True):
                                     st.session_state[f"confirm_{_wkey}"] = True
                                     st.rerun()
+                    elif w_assigned > 0:
+                        # P3.2: All entries in this window are assigned — show "done" marker
+                        st.markdown(f'<div class="sss-card" style="{highlight}padding:8px 12px;">'
+                                    f'<strong>🕐 {format_time_12h(w)} – {format_time_12h(w_end)}{current_tag}</strong> · '
+                                    f'<span style="color:#22c55e;font-weight:700;">✅ {w_assigned} assigned — Done</span></div>',
+                                    unsafe_allow_html=True)
                     elif is_current:
                         st.markdown(f'<div class="sss-card" style="{highlight}padding:8px 12px;opacity:.6;">'
                                     f'<strong>🕐 {format_time_12h(w)} – {format_time_12h(w_end)}{current_tag}</strong> · 0 pending</div>',

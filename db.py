@@ -657,7 +657,7 @@ def tier_sort_unassigned(queue_list, categories):
 # ═══════════════════════════════════════════════════
 #  V2.3.0 — BATCH ASSIGN
 # ═══════════════════════════════════════════════════
-def batch_assign_category(queue_list, category, assigned_by, branch=None):
+def batch_assign_category(queue_list, category, assigned_by, branch=None, target_window=None):
     """Batch-assign BQMS# to all unassigned entries in a category.
     Sort order (4-tier):
       1. ARRIVED + priority  → arrived_at ASC
@@ -667,6 +667,7 @@ def batch_assign_category(queue_list, category, assigned_by, branch=None):
     P3: When priority_lane_enabled, assigns BQMS# from lane-specific ranges.
     P3.2: When branch provided and time_slot_enabled, only assigns entries
           whose preferred_time_slot is current/past (window-gated).
+          When target_window set, only assigns that specific window's entries.
     Returns (count_assigned, first_bqms, last_bqms) or (0, None, None)."""
     cat_id = category["id"]
     prefix = category.get("bqms_prefix", "") or ""
@@ -679,7 +680,7 @@ def batch_assign_category(queue_list, category, assigned_by, branch=None):
             and e.get("status") not in TERMINAL]
 
     # P3.2: Window-gate filter — only assign due entries
-    pool = filter_due_for_assignment(pool, branch)
+    pool = filter_due_for_assignment(pool, branch, target_window=target_window)
 
     if not pool:
         return 0, None, None
@@ -1176,12 +1177,18 @@ def get_entries_by_window(queue_list, cat_id, time_slot, status_filter=None):
     return results
 
 
-def filter_due_for_assignment(pool, branch):
+def filter_due_for_assignment(pool, branch, target_window=None):
     """P3.2: Window-gate filter. Returns only entries whose preferred_time_slot
     is current/past, OR has no time slot (walk-ins, legacy entries).
+    When target_window is set, ONLY returns entries matching that specific window.
     When time_slot_enabled is OFF, returns pool unchanged."""
     if not branch or not branch.get("time_slot_enabled"):
         return pool
+    # P3.2: If a specific window is targeted, only match that window + no-slot entries
+    if target_window:
+        return [e for e in pool
+                if e.get("preferred_time_slot") == target_window
+                or not e.get("preferred_time_slot")]
     cur_win = get_current_window(branch)
     if not cur_win:
         # Before first window — only allow entries with no time slot
