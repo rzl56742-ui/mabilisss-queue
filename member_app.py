@@ -95,7 +95,7 @@ def load_bqms_data():
         bqms = get_bqms_state()
 
 # Screens that need full data
-if screen in ("home", "select_cat", "select_svc", "member_form"):
+if screen in ("home", "select_cat", "select_svc", "select_timeslot", "member_form"):
     load_queue_data()
 if screen == "tracker":
     load_queue_data()
