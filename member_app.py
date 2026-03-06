@@ -510,6 +510,20 @@ elif screen == "member_form":
                         lane_suffix = f" ({lane_label} lane)" if lane_label else ""
                         errors.append(f"No slots left for {cat['label']}{lane_suffix} today (cap: {cap_display}). Try next working day.")
 
+                    # P3.2: Online ceiling re-check (prevents exceeding online allocation)
+                    if branch.get("time_slot_enabled") and remaining > 0:
+                        _ol_rem = online_slots_remaining(fresh_q, cat, branch, lane=lane_value if cat.get("priority_lane_enabled") else None)
+                        if _ol_rem is not None and _ol_rem <= 0:
+                            errors.append(f"Online reservation limit reached for {cat['label']}. Walk-in slots may still be available at the branch.")
+                        # Also check per-window availability
+                        _sel_ts_check = st.session_state.get("sel_timeslot")
+                        if _ol_rem is not None and _ol_rem > 0 and _sel_ts_check:
+                            _win_avail = get_window_availability(fresh_q, cat, branch,
+                                            lane=lane_value if cat.get("priority_lane_enabled") else None)
+                            _sel_win = next((w for w in _win_avail if w["window"] == _sel_ts_check), None)
+                            if _sel_win and _sel_win["available"] <= 0:
+                                errors.append(f"The {format_time_12h(_sel_ts_check)} window is now full. Please go back and choose another time.")
+
                     if mob_clean and is_duplicate(fresh_q, lu, fu, mob_clean):
                         errors.append("You already have an active reservation today.")
 
@@ -882,7 +896,43 @@ elif screen == "tracker":
                     with m2:
                         st.markdown(f'<div class="sss-metric"><div class="val" style="color:#3399CC;">#{my_pos}</div><div class="lbl">Your Online Position<br/><span style="font-size:10px;">of {total_online} in {cat_name}</span></div></div>', unsafe_allow_html=True)
 
-                    if batch_passed:
+                    # P3.2: 3-tier messaging based on time slot status
+                    _pts_trk = t.get("preferred_time_slot")
+                    if _pts_trk:
+                        # Has time slot — compute window times for display
+                        _ti_trk = int(branch.get("slot_interval_minutes", 30) or 30)
+                        try:
+                            _pth, _ptm = map(int, _pts_trk.split(":"))
+                            _pt_min = _pth * 60 + _ptm
+                            _pte = _pt_min + _ti_trk
+                            _pteh, _ptem = divmod(_pte, 60)
+                            _win_disp = f"{format_time_12h(_pts_trk)} – {format_time_12h(f'{_pteh:02d}:{_ptem:02d}')}"
+                            _now_min = now.hour * 60 + now.minute
+                            _window_started = _now_min >= _pt_min
+                        except (ValueError, TypeError):
+                            _win_disp = _pts_trk
+                            _window_started = batch_passed
+
+                        if _window_started:
+                            # Tier 2: Window has started — assignment coming shortly
+                            st.markdown(f"""<div class="sss-alert sss-alert-yellow">
+                                ⏳ <strong>Waiting for BQMS Number</strong><br/>
+                                Your <strong>🕐 {_win_disp}</strong> window has started. The branch will assign your BQMS number shortly.<br/>
+                                <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span><br/>
+                                <span style="font-size:12px;opacity:.8;">📱 Your BQMS number will appear here automatically — just tap <b>Refresh</b> to check.</span><br/>
+                                <span style="font-size:12px;color:#ef4444;">⚠️ Once assigned, <b>be at the SSS Branch when your number is called.</b> If not present, you will need to queue again, subject to slot availability.</span>
+                            </div>""", unsafe_allow_html=True)
+                        else:
+                            # Tier 1: Window is future — tell member when to expect
+                            st.markdown(f"""<div class="sss-alert sss-alert-yellow">
+                                ⏳ <strong>Waiting for BQMS Number</strong><br/>
+                                You selected the <strong>🕐 {_win_disp}</strong> appointment window.<br/>
+                                Your BQMS number will be assigned <strong>starting at {format_time_12h(_pts_trk)}</strong>.<br/>
+                                <span style="font-size:12px;opacity:.8;">You are online reservation <b>#{my_pos} of {total_online}</b> for <b>{cat_name}</b>.</span><br/>
+                                <span style="font-size:12px;opacity:.8;">📱 Your BQMS number will appear here automatically — just tap <b>Refresh</b> to check.</span><br/>
+                                <span style="font-size:12px;color:#ef4444;">⚠️ Once assigned, <b>be at the SSS Branch when your number is called.</b> If not present, you will need to queue again, subject to slot availability.</span>
+                            </div>""", unsafe_allow_html=True)
+                    elif batch_passed:
                         st.markdown(f"""<div class="sss-alert sss-alert-yellow">
                             ⏳ <strong>Waiting for BQMS Number</strong><br/>
                             The branch is open and will assign your official queue number shortly.<br/>

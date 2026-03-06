@@ -145,6 +145,28 @@ bqms_state = get_bqms_state()
 o_stat = branch.get("o_stat", "online")
 sc = slot_counts(cats, queue)
 
+# ── P3.2: Auto-assign due windows on page load ──
+if branch.get("time_slot_enabled"):
+    _cur_win = get_current_window(branch)
+    if _cur_win:
+        # Check for due entries that haven't been assigned yet
+        _auto_pool = [e for e in queue
+                      if not e.get("bqms_number")
+                      and e.get("status") not in ("CANCELLED", "VOID", "EXPIRED")
+                      and e.get("preferred_time_slot")]
+        _auto_due = filter_due_for_assignment(_auto_pool, branch)
+        if _auto_due:
+            _auto_count = 0
+            for _acat in cats:
+                _aq = get_queue_today()
+                _n, _af, _al = batch_assign_category(_aq, _acat, "AUTO", branch=branch)
+                _auto_count += _n
+            if _auto_count > 0:
+                # Reload queue to reflect new assignments
+                queue = get_queue_today()
+                sc = slot_counts(cats, queue)
+                st.toast(f"🔄 Auto-assigned {_auto_count} BQMS# for due windows", icon="🕐")
+
 # ═══════════════════════════════════════════════════
 #  HEADER + NAV
 # ═══════════════════════════════════════════════════
