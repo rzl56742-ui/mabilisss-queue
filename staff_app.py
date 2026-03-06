@@ -33,9 +33,7 @@ from db import (
     OSTATUS, STATUS_LABELS, TERMINAL, FREED,
     ROLES, ROLE_LABELS, ROLE_ICONS,
     # P3.2: Time-slot appointment system
-    generate_time_windows, get_online_ceiling, online_slots_remaining,
-    get_window_availability, get_current_window, get_entries_by_window,
-    count_online_in_category,
+    generate_time_windows, get_current_window,
 )
 
 st.set_page_config(page_title="MabiliSSS Staff", page_icon="🔐", layout="centered")
@@ -738,7 +736,6 @@ elif tab == "queue":
                             "source": "KIOSK",
                             "issued_at": ts,
                             "arrived_at": ts if bv_check else None,
-                            "preferred_time_slot": None,  # P3.2: Walk-ins bypass time slots
                         }
                         insert_queue_entry(entry)
                         st.success(f"✅ **{rn}** registered! Share this with the member.")

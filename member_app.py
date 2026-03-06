@@ -18,8 +18,7 @@ from db import (
     is_reservation_open, format_time_12h, get_logo,
     OSTATUS, STATUS_LABELS, TERMINAL, FREED,
     # P3.2: Time-slot appointment system
-    generate_time_windows, get_online_ceiling, online_slots_remaining,
-    get_window_availability,
+    online_slots_remaining, get_window_availability,
 )
 
 st.set_page_config(page_title="MabiliSSS Queue", page_icon="🏛️", layout="centered")
@@ -184,6 +183,7 @@ if screen == "home":
         if st.button("📋 Reserve a Slot", use_container_width=True, type="primary", disabled=not can_reserve):
             st.session_state.sel_cat = None
             st.session_state.sel_svc = None
+            st.session_state.sel_timeslot = None  # P3.2: Clear stale time slot
             go("select_cat")
     with c2:
         if st.button("🔍 Track My Queue", use_container_width=True):
@@ -543,9 +543,11 @@ elif screen == "member_form":
                             "bqms_number": None,
                             "source": "ONLINE",
                             "issued_at": ts,
-                            # P3.2: Time slot appointment
-                            "preferred_time_slot": st.session_state.get("sel_timeslot") if branch.get("time_slot_enabled") else None,
                         }
+                        # P3.2: Only include preferred_time_slot when time slots are enabled and selected
+                        _sel_ts_val = st.session_state.get("sel_timeslot") if branch.get("time_slot_enabled") else None
+                        if _sel_ts_val:
+                            entry["preferred_time_slot"] = _sel_ts_val
                         insert_queue_entry(entry)
                         st.session_state.ticket = entry
                         go("ticket")
